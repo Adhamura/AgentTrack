@@ -5,7 +5,7 @@
  * over the blank slots these leave for them.
  */
 import type { Category, Task } from '../types'
-import type { Counts, Filter, SectionId, Summary } from './board'
+import type { Counts, Filter, Scope, SectionId, Summary } from './board'
 import { countTasks, currentStep, relTime, rowCheck, sectionOf } from './board'
 import { runs } from './search'
 
@@ -223,11 +223,54 @@ export const tabsLayout = (tabs: readonly TabSpec[]) => {
   })
 }
 
-export const tabsSvg = (tabs: readonly TabSpec[], active: string) => {
+/** The scope switch's words, in the order drawn. */
+export const SCOPE_LABEL: Record<Scope, string> = { session: 'Session', project: 'Project', all: 'All' }
+const SCOPE_TOP = 9
+const SCOPE_H = 32
+
+/** Where each option of the scope switch sits, at the bar's right end, in its 925 px. */
+export const scopeLayout = (scopes: readonly Scope[]) => {
+  const ws = scopes.map(sc => 24 + SCOPE_LABEL[sc].length * 8.8)
+  let x = W - 4 - ws.reduce((a, b) => a + b, 0)
+
+  return scopes.map((id, i) => {
+    const at = { id, x, w: ws[i]!, top: SCOPE_TOP, h: SCOPE_H }
+    x += ws[i]!
+
+    return at
+  })
+}
+
+/** The scope switch: one rounded outline, the picked option filled. */
+const scopeSvg = (scopes: readonly Scope[], picked: Scope) => {
+  const at = scopeLayout(scopes)
+  const first = at[0]
+  const last = at[at.length - 1]
+  if (!first || !last) return ''
+
+  return (
+    `<rect x="${first.x}" y="${SCOPE_TOP}" width="${last.x + last.w - first.x}" height="${SCOPE_H}" rx="16" fill="#fff" stroke="${INK.border}"/>` +
+    at
+      .map(o => {
+        const isOn = o.id === picked
+
+        return (
+          (isOn ? `<rect x="${o.x + 3}" y="${SCOPE_TOP + 3}" width="${o.w - 6}" height="${SCOPE_H - 6}" rx="13" fill="#ececee"/>` : '') +
+          `<text x="${o.x + o.w / 2}" y="${SCOPE_TOP + 21}" font-size="15" text-anchor="middle" fill="${isOn ? INK.text : INK.sub}"${
+            isOn ? ' font-weight="500"' : ''
+          }>${SCOPE_LABEL[o.id]}</text>`
+        )
+      })
+      .join('')
+  )
+}
+
+export const tabsSvg = (tabs: readonly TabSpec[], active: string, scope?: { scopes: readonly Scope[]; picked: Scope }) => {
   const at = tabsLayout(tabs)
 
   return svg(
     TABS_H,
+    (scope ? scopeSvg(scope.scopes, scope.picked) : '') +
     tabs
       .map((t, i) => {
         const { x, w } = at[i] ?? { x: 0, w: 0 }

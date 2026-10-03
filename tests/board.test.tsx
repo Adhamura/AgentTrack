@@ -4,7 +4,7 @@ import { applyLive, itemsOf, parseDoc, tabPaneId } from '../hooks/docs'
 import { partial, sameWork } from '../hooks/match'
 import { claudeArgv, compareVersions, findInstalled, installedVersion, lastLine, marketplaceDir, offered, outcomeText, pluginsDirOf, versionOf } from '../hooks/update'
 import { matches, runs, terms } from '../hooks/search'
-import { applyTodoWrite, emptyBoard, grouped, mergePeers, relTime, rowCheck, summarize } from '../hooks/board'
+import { applyTodoWrite, emptyBoard, grouped, inProject, mergePeers, peerWork, relTime, rowCheck, scopedPeers, summarize } from '../hooks/board'
 
 const PANE = { component: 'Pane', requestId: 'agent-track' } as const
 
@@ -419,4 +419,96 @@ test('a board left open over a reload is seated and drawn again', async ($, on) 
   for (let i = 0; i < 20 && invalidated.length === 0; i++) await Promise.resolve()
   expect(opened).toContain('agent-track')
   expect(invalidated).toContain('ui.render')
+})
+
+test('the scope picks the sessions shown: this one, this project, or all', async () => {
+  expect(inProject('/p', '/p')).toBe(true)
+  expect(inProject('/p/sub/', '/p')).toBe(true)
+  expect(inProject('/pp', '/p')).toBe(false)
+  expect(inProject('C:\\Work\\Game', 'c:/work/game')).toBe(true)
+  expect(inProject('', '/p')).toBe(false)
+  const board = (title: string) => ({
+    seq: 1,
+    categories: [
+      {
+        id: 'main',
+        title: 'Main',
+        kind: 'session' as const,
+        isLive: true,
+        isFinished: false,
+        startedAt: 0,
+        updatedAt: 0,
+        tasks: [{ id: 't1', title, activeForm: `Doing ${title}`, status: 'in_progress' as const, createdAt: 0, updatedAt: 0 }],
+      },
+    ],
+  })
+  const peers = [
+    { sessionId: 'a', name: 'Here', cwd: '/p/sub', status: 'busy', isRunning: true, updatedAt: 0, board: board('HU.5 Keys') },
+    { sessionId: 'b', name: 'There', cwd: '/q', status: 'busy', isRunning: true, updatedAt: 0, board: board('Other') },
+  ]
+  expect(scopedPeers('session', peers, '/p')).toEqual([])
+  expect(scopedPeers('project', peers, '/p').map(p => p.name)).toEqual(['Here'])
+  expect(scopedPeers('all', peers, '/p').length).toBe(2)
+  expect(peerWork(scopedPeers('project', peers, '/p'))).toEqual(['HU.5 Keys', 'Doing HU.5 Keys'])
+  expect(peerWork([{ ...peers[0]!, isRunning: false }])).toEqual([])
+})
+
+test('the switch at the top right shows this session, this project or every session', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const kept: Record<string, unknown> = {}
+  on('store.get', ($, e) => ({ value: kept[e.key] }))
+  on('store.set', ($, e) => {
+    kept[e.key] = e.value
+
+    return { value: undefined } as never
+  })
+  on('agent.list', () => ({ value: [] }))
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('env.get', ($, e) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
+  on('session.id', () => ({ value: 'me' }))
+  const files: Record<string, string> = {
+    '/h/.claude/sessions/1.json': JSON.stringify({ sessionId: 'me', name: 'Mine', cwd: '/p', status: 'busy' }),
+    '/h/.claude/sessions/2.json': JSON.stringify({ sessionId: 'a', name: 'Same project', cwd: '/p/sub', status: 'busy' }),
+    '/h/.claude/sessions/3.json': JSON.stringify({ sessionId: 'b', name: 'Elsewhere', cwd: '/q', status: 'idle' }),
+  }
+  on('fs.read', ($, e) => {
+    const text = files[e.path]
+    if (text === undefined) throw new Error('ENOENT')
+
+    return { value: text }
+  })
+  on('fs.write', () => ({ value: undefined }) as never)
+  on('fs.stat', ($, e) => {
+    if (e.path === '.') return { value: { kind: 'dir', mtimeMs: 0, size: 0, realPath: '/p' } as never }
+    throw new Error('ENOENT')
+  })
+  on('fs.list', ($, e) => ({
+    value: e.path.endsWith('/sessions')
+      ? ['1.json', '2.json', '3.json'].map(name => ({ name, kind: 'file', mtimeMs: 1_000_000, size: 1 }) as never)
+      : [],
+  }))
+  on('tool.register', () => ({ value: { tool: 'mcp__agent-track__todo' } }))
+  on('command.register', () => ({ value: { command: 'agent-track' } }))
+  on('session.start', ($, e) => e as never)
+  await $.session.start({ cwd: '/p', surface: 'desktop', isInteractive: true } as never)
+  await clock.advance(2_100)
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const ui = await $.ui.mount({ plugin: 'agent-track', surface, ...PANE, props: paneProps as never })
+    const shows = async (re: RegExp) =>
+      surface === 'desktop'
+        ? (await ui.findAll({ type: 'Svg' })).some(el => re.test(String(el.props.alt)))
+        : (await ui.find({ text: re })) !== undefined
+    await ui.press({ key: 'scope-project' })
+    expect(await shows(/Same project/)).toBe(true)
+    expect(await shows(/Elsewhere/)).toBe(false)
+    await ui.press({ key: 'scope-all' })
+    expect(await shows(/Elsewhere/)).toBe(true)
+    await ui.press({ key: 'scope-session' })
+    expect(await shows(/Same project/)).toBe(false)
+    expect(await shows(/Elsewhere/)).toBe(false)
+    await ui.unmount()
+  }
+  expect(kept.scope).toBe('session')
 })

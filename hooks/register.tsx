@@ -25,8 +25,12 @@ import {
   bar,
   keepsRow,
   tasksFor,
+  SCOPES,
+  isScope,
+  peerWork,
+  scopedPeers,
 } from './board'
-import type { Filter, SectionId, Summary, TodoItem } from './board'
+import type { Filter, Scope, SectionId, Summary, TodoItem } from './board'
 import { CONFIG_FILE, applyLive, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
 import type { DocTab } from './docs'
 import {
@@ -47,7 +51,7 @@ import {
 import type { UpdateOutcome } from './update'
 import { matches, runs, terms } from './search'
 import type { Motion, TabSpec } from './look'
-import { INK, PILL_H, PILL_TOP, SECTION_DOT, SUMMARY_H, TABS_H, W, tabsLayout, tabsSvg, agentRowSvg, emptyRowSvg, headerSvg, sectionHeadSvg, summaryPills, summarySvg, taskRowSvg } from './look'
+import { INK, PILL_H, PILL_TOP, SCOPE_LABEL, SECTION_DOT, SUMMARY_H, TABS_H, W, scopeLayout, tabsLayout, tabsSvg, agentRowSvg, emptyRowSvg, headerSvg, sectionHeadSvg, summaryPills, summarySvg, taskRowSvg } from './look'
 
 const PANE = 'agent-track'
 const TODO_TOOL = 'mcp__agent-track__todo'
@@ -70,6 +74,9 @@ const view = atom({ plugin: 'agent-track', key: 'view' } as const, PANE as strin
 const filters = atom({ plugin: 'agent-track', key: 'filter' } as const, {} as Record<string, Filter>)
 const updating = atom({ plugin: 'agent-track', key: 'updating' } as const, false)
 const searches = atom({ plugin: 'agent-track', key: 'search' } as const, {} as Record<string, string>)
+const scope = atom({ plugin: 'agent-track', key: 'scope' } as const, 'project' as Scope)
+/** Where the picked scope is kept past the session, so the next one opens the same way. */
+const SCOPE_STORE = 'scope'
 
 /** How long after a toggle its drawing still plays the turn. */
 const MOTION_MS = 700
@@ -183,7 +190,7 @@ const summaryCard = ($: $, els: Els, Art: SvgEl, pane: string, sum: Summary, fil
 
 /** The board's tabs: each project checklist, then Agents last, each with its percent. */
 const tabList = async ($: $): Promise<TabSpec[]> => {
-  const sum = summarize(mergePeers(await read($, board), await read($, selfName), await read($, peers)))
+  const sum = summarize(await shownBoard($))
   const live = await read($, liveWork)
   const all = await read($, docs)
 
@@ -200,45 +207,57 @@ const tabList = async ($: $): Promise<TabSpec[]> => {
 }
 
 /** The desktop tab bar: drawn, with a click target over each tab. */
-const tabStrip = ($: $, els: Els, Art: SvgEl, tabs: readonly TabSpec[], active: string) => {
+const tabStrip = ($: $, els: Els, Art: SvgEl, tabs: readonly TabSpec[], active: string, picked: Scope) => {
   const { Box } = els
+  // A single tab needs no tab of its own: the bar then holds the scope switch alone.
+  const shown = tabs.length > 1 ? tabs : []
 
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Art
-        source={tabsSvg(tabs, active)}
-        alt={`Tabs: ${tabs.map(t => (t.id === active ? `${t.title} (shown)` : t.title)).join(', ')}`}
+        source={tabsSvg(shown, active, { scopes: SCOPES, picked })}
+        alt={`${shown.length > 0 ? `Tabs: ${shown.map(t => (t.id === active ? `${t.title} (shown)` : t.title)).join(', ')}. ` : ''}Showing: ${SCOPE_LABEL[picked]}`}
       />
-      {hitRow(
-        els,
-        TABS_H,
-        0,
-        TABS_H,
-        tabsLayout(tabs).map(t => ({ key: `tab-${t.id}`, x: t.x, w: t.w, onPress: () => void update($, view, () => t.id) })),
-      )}
+      {hitRow(els, TABS_H, 0, TABS_H, [
+        ...tabsLayout(shown).map(t => ({ key: `tab-${t.id}`, x: t.x, w: t.w, onPress: () => void update($, view, () => t.id) })),
+        ...scopeLayout(SCOPES).map(o => ({ key: `scope-${o.id}`, x: o.x, w: o.w, onPress: () => void pickScope($, o.id) })),
+      ])}
     </Box>
   )
 }
 
 /** The terminal tab bar: a Button per tab, the shown one in brackets. */
-const tabRowText = ($: $, els: Els, tabs: readonly TabSpec[], active: string) => {
+const tabRowText = ($: $, els: Els, tabs: readonly TabSpec[], active: string, picked: Scope) => {
   const { Box, Button } = els
 
   return (
-    <Box flexDirection="row" gap={2} marginBottom={1}>
-      {tabs.map(t => {
-        const label = `${t.title}${t.percent === undefined ? '' : ` ${t.percent}%`}`
+    <Box flexDirection="row" gap={2} marginBottom={1} justifyContent="space-between">
+      <Box flexDirection="row" gap={2} flexShrink={1}>
+        {(tabs.length > 1 ? tabs : []).map(t => {
+          const label = `${t.title}${t.percent === undefined ? '' : ` ${t.percent}%`}`
 
-        return (
+          return (
+            <Button
+              key={`tab-${t.id}`}
+              plain
+              label={t.id === active ? `[${label}]` : label}
+              dimColor={t.id !== active}
+              onPress={() => void update($, view, () => t.id)}
+            />
+          )
+        })}
+      </Box>
+      <Box flexDirection="row" gap={1} flexShrink={0}>
+        {SCOPES.map(sc => (
           <Button
-            key={`tab-${t.id}`}
+            key={`scope-${sc}`}
             plain
-            label={t.id === active ? `[${label}]` : label}
-            dimColor={t.id !== active}
-            onPress={() => void update($, view, () => t.id)}
+            label={sc === picked ? `[${SCOPE_LABEL[sc]}]` : SCOPE_LABEL[sc]}
+            dimColor={sc !== picked}
+            onPress={() => void pickScope($, sc)}
           />
-        )
-      })}
+        ))}
+      </Box>
     </Box>
   )
 }
@@ -403,7 +422,7 @@ const listJson = async ($: $, dir: string) => {
  * to the running-session registry (<claude home>/sessions/<pid>.json), which
  * every Claude Code session keeps, mod or not.
  */
-const ctx = { home: '', selfId: '', lastWritten: '', lastPeers: '', isSyncing: false }
+const ctx = { home: '', selfId: '', cwd: '', lastWritten: '', lastPeers: '', isSyncing: false }
 
 const syncInit = async ($: $) => {
   const config = await $.env.get('CLAUDE_CONFIG_DIR')
@@ -424,6 +443,7 @@ const syncRun = async ($: $) => {
   }
 
   const me = running.get(selfId)
+  if (me?.cwd) ctx.cwd = me.cwd
   if (me?.name && me.name !== (await read($, selfName))) await update($, selfName, () => me.name ?? '')
 
   const local = await read($, board)
@@ -471,6 +491,19 @@ const syncRun = async ($: $) => {
 const docCtx = { tabs: [] as DocTab[], seen: {} as Record<string, number>, project: '' }
 
 const DOC_SPAN = 7 * 24 * 60 * 60 * 1000
+
+/** This session's project folder: the one it was started in, resolved, else the folder the session registry names. */
+const projectDir = () => docCtx.project || ctx.cwd
+
+/** The board as the picked scope shows it: this session's rows, and the other sessions' it takes in. */
+const shownBoard = async ($: $) =>
+  mergePeers(await read($, board), await read($, selfName), scopedPeers(await read($, scope), await read($, peers), projectDir()))
+
+/** Picks the scope, and keeps it for the next session. */
+const pickScope = async ($: $, picked: Scope) => {
+  await update($, scope, () => picked)
+  await $.store.set(SCOPE_STORE, picked)
+}
 
 const loadDocConfig = async ($: $) => {
   try {
@@ -540,7 +573,9 @@ const refreshLive = async ($: $) => {
       ...(c.kind === 'agent' && c.isLive ? [c.title] : []),
       ...c.tasks.filter(t => t.status === 'in_progress').flatMap(t => [t.title, t.activeForm ?? '']),
     ])
-  const list = [...new Set([...agents, ...todos].map(t => t.trim()).filter(t => t.length > 0))].sort()
+  // Work running in this project's other sessions counts too, unless the board shows this session alone.
+  const others = (await read($, scope)) === 'session' ? [] : peerWork(scopedPeers('project', await read($, peers), projectDir()))
+  const list = [...new Set([...agents, ...todos, ...others].map(t => t.trim()).filter(t => t.length > 0))].sort()
   const was = await read($, liveWork)
   if (list.join('|') !== was.join('|')) await update($, liveWork, () => list)
 }
@@ -577,7 +612,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
 
   await read($, tick)
   const now = await $.clock.now()
-  const b = mergePeers(await read($, board), await read($, selfName), await read($, peers))
+  const b = await shownBoard($)
   const shut = new Set(await read($, collapsed))
   const pick = await read($, selected)
   const sum = summarize(b)
@@ -1465,6 +1500,8 @@ export const register: Register = (on, options) => {
     })
     $.clock.every(30_000, () => void update($, tick, n => n + 1))
     await syncInit($)
+    const kept = await $.store.get(SCOPE_STORE)
+    if (isScope(kept)) await update($, scope, () => kept)
     await loadDocConfig($)
     await refreshDocs($, true)
     await closeOldTabs($)
@@ -1497,7 +1534,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
-    const sum = summarize(mergePeers(await read($, board), await read($, selfName), await read($, peers)))
+    const sum = summarize(await shownBoard($))
     const live = await read($, liveWork)
     const tabs = Object.entries(await read($, docs)).flatMap(([id, raw]) => {
       const tab = docCtx.tabs.find(t => tabPaneId(t) === id)
@@ -1684,17 +1721,17 @@ const drawBoard = async ($: $, e: RenderInput<'Pane'>) => {
   const { Box, Text } = els
   const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
   const tabs = await tabList($)
-  const picked = await read($, view)
-  const active = tabs.find(t => t.id === picked) ?? tabs[0]!
+  const shownTab = await read($, view)
+  const active = tabs.find(t => t.id === shownTab) ?? tabs[0]!
   const body =
     active.id === PANE
       ? await drawAgents($, e)
       : ((await drawDoc($, e, active.id)) ?? <Text dimColor>Loading {active.title}…</Text>)
-  if (tabs.length < 2) return body
+  const picked = await read($, scope)
 
   return (
     <Box flexDirection="column">
-      {Svg ? tabStrip($, els, Svg, tabs, active.id) : tabRowText($, els, tabs, active.id)}
+      {Svg ? tabStrip($, els, Svg, tabs, active.id, picked) : tabRowText($, els, tabs, active.id, picked)}
       {body}
     </Box>
   )
