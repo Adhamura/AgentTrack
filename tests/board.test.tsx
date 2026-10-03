@@ -299,10 +299,11 @@ test('the summary pills filter the board by status, with All as the way back', a
     expect(await ui.find({ key: 'task-main::t1' })).toBeUndefined()
     expect(await ui.find({ key: 'head-working' })).toBeDefined()
     if (surface === 'desktop') {
-      // The invisible click targets fit their pills: a wider label is cut with an ellipsis on a desktop.
-      const hits = (await ui.findAll({ type: 'Button' })).map(el => String(el.props.label)).filter(l => /^\u2007+$/.test(l))
+      // Each invisible click target is laid out in a room far wider than its cell, so a desktop never cuts its label with an ellipsis.
+      const hits = (await ui.findAll({ type: 'Button' })).filter(el => /^\u2007+$/.test(String(el.props.label)))
+      const rooms = (await ui.findAll({ type: 'Box' })).filter(el => el.props.width === 400 && el.props.flexShrink === 0)
       expect(hits.length).toBeGreaterThan(0)
-      expect(hits.every(l => l.length < paneProps.bodyColumns * 0.3)).toBe(true)
+      expect(rooms.length).toBe(hits.length)
     }
     await ui.unmount()
   }
