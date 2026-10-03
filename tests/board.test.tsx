@@ -278,6 +278,12 @@ test('the summary pills filter the board by status, with All as the way back', a
     await ui.press({ key: 'filter-agent-track:all' })
     expect(await ui.find({ key: 'task-main::t1' })).toBeUndefined()
     expect(await ui.find({ key: 'head-working' })).toBeDefined()
+    if (surface === 'desktop') {
+      // The invisible click targets fit their pills: a wider label is cut with an ellipsis on a desktop.
+      const hits = (await ui.findAll({ type: 'Button' })).map(el => String(el.props.label)).filter(l => /^\u2007+$/.test(l))
+      expect(hits.length).toBeGreaterThan(0)
+      expect(hits.every(l => l.length < paneProps.bodyColumns * 0.3)).toBe(true)
+    }
     await ui.unmount()
   }
 
