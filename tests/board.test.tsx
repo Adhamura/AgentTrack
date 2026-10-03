@@ -4,7 +4,7 @@ import { applyLive, columnCounts, columnsOf, itemsOf, parseDoc, splitFacets, tab
 import { partial, sameWork } from '../hooks/match'
 import { claudeArgv, compareVersions, findInstalled, installedVersion, lastLine, marketplaceDir, offered, outcomeText, pluginsDirOf, versionOf } from '../hooks/update'
 import { matches, runs, terms } from '../hooks/search'
-import { applyTodoWrite, emptyBoard, grouped, inProject, mergePeers, peerWork, projectKey, relTime, rowCheck, scopedPeers, summarize, syncAgents } from '../hooks/board'
+import { applyTodoWrite, emptyBoard, ensureCategory, grouped, inProject, isBlank, mergePeers, peerWork, projectKey, relTime, rowCheck, scopedPeers, summarize, syncAgents } from '../hooks/board'
 
 const PANE = { component: 'Pane', requestId: 'agent-track' } as const
 
@@ -55,7 +55,10 @@ describe('board model', () => {
     expect(write?.startedAt).toBe(5000)
     expect(summarize(b).percent).toBe(50)
     expect(grouped(b).find(s => s.id === 'working')?.categories.length).toBe(1)
-    expect(relTime(0, 125_000)).toBe('2m')
+    expect(relTime(5_000, 125_000)).toBe('2m')
+    // No time is no pill text (the pill shows a dash), and a very old one stays short.
+    expect(relTime(0, 125_000)).toBe('')
+    expect(relTime(1, 200 * 86_400_000)).toBe('99d+')
   })
 
   test('the summary counts what the rows show, and parents check by their children', async () => {
@@ -384,7 +387,9 @@ test('project checklists are tabs inside the one board pane, each filtering on i
     await ui.press({ key: 'search-clear-agent-track-roadmap' })
     expect(await ids()).toEqual([])
     await ui.press({ key: 'tab-agent-track' })
-    expect(await ui.find({ key: 'filter-agent-track:all' })).toBeDefined()
+    // Nothing on Agents yet: one empty-state card (with the scope switch), no summary.
+    expect(await ui.find({ key: 'filter-agent-track:all' })).toBeUndefined()
+    expect(await ui.find({ key: 'scope-project' })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -561,4 +566,51 @@ test('a line written as name — part, part gets a column per part, done unless 
   // A list with no line of two parts keeps its names whole.
   expect(doc.sections[1]!.items[0]).toMatchObject({ title: 'Story — draft the intro' })
   expect(doc.sections[1]!.items[0]!.facets).toBeUndefined()
+})
+
+test('a bold name keeps its own dash, and a list gets columns only when most of its lines have parts', async () => {
+  const roadmap = [
+    '## Hunt',
+    '- [x] **HU.4 — Affixes.** Prefix and suffix rolls for every beast.',
+    '- [ ] **HU.5 — The trail.** Tracks, scent and the night pass.',
+    '- [ ] **HU.6 — Night.** Lighting and the moon cycle.',
+  ].join('\n')
+  const doc = parseDoc(roadmap, { title: 'Roadmap', file: 'r.md' })
+  const items = doc.sections[0]!.items
+  expect(items.map(i => i.title)).toEqual(['HU.4 — Affixes', 'HU.5 — The trail', 'HU.6 — Night'])
+  expect(items.every(i => i.facets === undefined)).toBe(true)
+  expect(splitFacets('**HU.5 — The trail.** Tracks, scent and the night pass.')).toBeUndefined()
+  // A bold name followed by real parts still splits after the bold span.
+  expect(splitFacets('**cg-gate** — dressed, no art')?.name).toBe('cg-gate')
+  // A part of more than three words is prose, not a column.
+  expect(splitFacets('Story — draft the whole intro chapter, art')).toBeUndefined()
+  // One line of parts among three plain ones is not a list of parts.
+  const few = parseDoc(['## Notes', '- [ ] a — dressed, art', '- [ ] b', '- [ ] c', '- [ ] d'].join('\n'), { title: 'N', file: 'n.md' })
+  expect(few.sections[0]!.items[0]!.facets).toBeUndefined()
+  expect(few.sections[0]!.items[0]!.title).toBe('a — dressed, art')
+})
+
+test('an empty board shows one empty-state card, not a summary of nothing', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  on('agent.list', () => ({ value: [] }))
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  // This session's own row before any todo list is no item of work.
+  const bare = ensureCategory(emptyBoard(), 'main', { title: 'Main session', kind: 'session' }, 1000)
+  expect(isBlank(bare)).toBe(true)
+  expect(summarize(bare).total).toBe(0)
+  await $.prompt.submit({ prompt: 'hi' } as never).catch(() => undefined)
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const ui = await $.ui.mount({ plugin: 'agent-track', surface, ...PANE, props: paneProps as never })
+    const said = async (re: RegExp) =>
+      surface === 'desktop'
+        ? (await ui.findAll({ type: 'Svg' })).some(el => re.test(String(el.props.alt)))
+        : (await ui.find({ text: re })) !== undefined
+    expect(await said(/No tasks yet/)).toBe(true)
+    expect(await said(/0\/1/)).toBe(false)
+    expect(await ui.find({ key: 'filter-agent-track:all' })).toBeUndefined()
+    expect(await ui.find({ key: 'head-working' })).toBeUndefined()
+    expect(await ui.find({ key: 'scope-session' })).toBeDefined()
+    await ui.unmount()
+  }
 })

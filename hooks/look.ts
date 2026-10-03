@@ -1,73 +1,247 @@
 /**
- * The desktop board's artwork: each piece is one SVG drawn in the reference
- * screenshot's own pixels (a 925 px wide content column), so every piece
- * scales together and lines up. Controls (chevrons, ⋯) are native Buttons laid
- * over the blank slots these leave for them.
+ * The desktop board's artwork. Every strip is one SVG laid out at the pane's
+ * own width (`widthFor`), so one unit is one CSS pixel and text keeps its
+ * size at any width. A `Layout` holds the named anchors every strip lines up
+ * on. Colors are tokens with a light and a dark value: the light one is
+ * written on the element, the dark one in a `prefers-color-scheme` rule, so
+ * a drawing reads on either host. Click targets are native Buttons laid over
+ * the strips at the same anchors.
  */
-import type { Category, Facet, Task } from '../types'
-import type { Counts, Filter, Scope, SectionId, Summary } from './board'
-import { countTasks, currentStep, relTime, rowCheck, sectionOf } from './board'
+import type { Category, Facet, TaskStatus } from '../types'
+import type { Filter, Scope, SectionId } from './board'
 import { runs } from './search'
 
-export const W = 925
+/* ------------------------------------------------------------------ tokens */
 
-export const INK = {
+const LIGHT = {
   text: '#1b1c22',
-  sub: '#8a8d99',
-  count: '#737886',
-  label: '#4d4e55',
-  border: '#e9ebee',
-  sep: '#f1f2f4',
-  head: '#f4f5f6',
-  pill: '#f4f5f6',
-  bar: '#4cc785',
-  barTrack: '#eef0f2',
-  green: '#2fb36a',
-  greenDot: '#37b76d',
-  greenText: '#0c773b',
-  greenBg: '#f1fbf5',
-  blue: '#1f6ff5',
-  blueText: '#0a62e8',
-  blueBg: '#f1f6fe',
-  blueTrack: '#cfdcf5',
-  gray: '#9295a1',
-  grayText: '#5d5e69',
-  grayBg: '#f2f2f4',
-  pink: '#dc267a',
-  doneDot: '#15ab49',
-  check: '#62cb94',
-  box: '#b6b8c1',
-  chipDoneBg: '#e9f8f0',
-  chipDoneText: '#2f9e66',
-  /** The characters a search found: drawn bold in this color. */
+  text2: '#3a3c45',
+  sub: '#6b6e7a',
+  faint: '#9a9da8',
+  border: '#e3e5e9',
+  sep: '#eff0f2',
+  head: '#f4f5f7',
+  pill: '#f2f3f5',
+  track: '#e8eaee',
+  seg: '#e6e7eb',
+  done: '#2fb36a',
+  doneText: '#1f7f4f',
+  doneBg: '#eaf7ef',
+  active: '#1f6ff5',
+  activeText: '#0a62e8',
+  activeBg: '#eef4fe',
+  activeTrack: '#c9dafa',
+  pending: '#8a8d99',
+  pendingText: '#5d5e69',
+  pendingBg: '#f2f2f4',
+  box: '#8f92a0',
+  onFill: '#ffffff',
   hit: '#d9480f',
 }
+type Tok = keyof typeof LIGHT
+
+const DARK: Record<Tok, string> = {
+  text: '#ececf1',
+  text2: '#c9cbd3',
+  sub: '#a0a3ae',
+  faint: '#7c7f8a',
+  border: '#34363e',
+  sep: '#2a2c33',
+  head: '#26282e',
+  pill: '#2b2d34',
+  track: '#33353d',
+  seg: '#3a3c45',
+  done: '#3cc77a',
+  doneText: '#86dfaa',
+  doneBg: '#1b3326',
+  active: '#4d8ff8',
+  activeText: '#a3c4ff',
+  activeBg: '#1c2a45',
+  activeTrack: '#2d4068',
+  pending: '#8a8d99',
+  pendingText: '#b9bbc4',
+  pendingBg: '#2c2e35',
+  box: '#7a7d89',
+  onFill: '#ffffff',
+  hit: '#ff8a4c',
+}
+
+/** A state's three tokens: its mark, its text, and the wash behind that text. */
+export type Tone = 'done' | 'active' | 'pending'
+const TONE: Record<Tone, { fg: Tok; text: Tok; bg: Tok }> = {
+  done: { fg: 'done', text: 'doneText', bg: 'doneBg' },
+  active: { fg: 'active', text: 'activeText', bg: 'activeBg' },
+  pending: { fg: 'pending', text: 'pendingText', bg: 'pendingBg' },
+}
+
+/**
+ * Each task status as every surface shows it: its words, its tone, its
+ * terminal glyph (a square for a tracked leaf) and the host theme key native
+ * text is colored with.
+ */
+export const STATUS: Record<TaskStatus, { label: string; tone: Tone; glyph: string }> = {
+  completed: { label: 'Done', tone: 'done', glyph: '☑' },
+  in_progress: { label: 'In progress', tone: 'active', glyph: '▣' },
+  pending: { label: 'Not started', tone: 'pending', glyph: '☐' },
+}
+
+/** Native text takes the host's theme keys, so it follows a light or dark host. */
+export const TONE_KEY: Record<Tone, string> = { done: 'success', active: 'permission', pending: 'inactive' }
+/** The theme key search hits are drawn in, in native text. */
+export const HIT_KEY = 'warning'
+
+export const SECTION_TONE: Record<SectionId, Tone> = { working: 'active', waiting: 'pending', done: 'done' }
+
+/** The tone of a share of work: all done, some started or live, or nothing yet. */
+export const toneOf = (done: number, total: number, isActive = false): Tone =>
+  total > 0 && done === total ? 'done' : isActive || done > 0 ? 'active' : 'pending'
+
+/**
+ * An element's paint: the light color as the attribute (what shows if a
+ * surface drops the style sheet), a class whose dark value `svg` adds.
+ */
+const paint = (fill?: Tok, stroke?: Tok) =>
+  `class="${[fill ? `f-${fill}` : '', stroke ? `s-${stroke}` : ''].filter(Boolean).join(' ')}"` +
+  ` fill="${fill ? LIGHT[fill] : 'none'}"` +
+  (stroke ? ` stroke="${LIGHT[stroke]}"` : '')
 
 const SANS = `Inter, 'Segoe UI', -apple-system, system-ui, sans-serif`
 const SERIF = `'Tiempos Headline', Georgia, 'Times New Roman', serif`
 
-const esc = (s: string) =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-/** Cuts text to roughly `px` wide at `perChar` px per character, with an ellipsis. */
-export const fit = (s: string, px: number, perChar: number) => {
-  const max = Math.max(1, Math.floor(px / perChar))
+const svg = (w: number, h: number, body: string) => {
+  const used = new Set<string>()
+  for (const m of body.matchAll(/class="([^"]*)"/g)) for (const c of (m[1] ?? '').split(' ')) if (c) used.add(c)
+  const dark = [...used]
+    .map(c => {
+      const tok = c.slice(2) as Tok
+      const v = DARK[tok]
 
-  return s.length <= max ? s : `${s.slice(0, Math.max(1, max - 1)).trimEnd()}…`
-}
-
-/**
- * A text cut to fit like `fit`, escaped, with the characters the search
- * `words` found drawn bold in the highlight color.
- */
-export const marked = (s: string, px: number, perChar: number, words: readonly string[] = []) =>
-  runs(fit(s, px, perChar), words)
-    .map(r => (r.isHit ? `<tspan font-weight="700" fill="${INK.hit}">${esc(r.text)}</tspan>` : esc(r.text)))
+      return v ? `.${c}{${c.startsWith('f-') ? 'fill' : 'stroke'}:${v}}` : ''
+    })
     .join('')
 
-const svg = (h: number, body: string) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${h}" viewBox="0 0 ${W} ${h}" ` +
-  `font-family="${SANS}">${body}</svg>`
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" font-family="${SANS}">` +
+    (dark ? `<style>@media (prefers-color-scheme: dark){${dark}}</style>` : '') +
+    body +
+    `</svg>`
+  )
+}
+
+/* ------------------------------------------------------------------ text */
+
+const ADV: Record<string, number> = {}
+const adv = (chars: string, w: number) => {
+  for (const c of chars) ADV[c] = w
+}
+adv(' ', 0.27)
+adv("il.,:;'|!`", 0.26)
+adv('jftrI()[]{}"', 0.36)
+adv('abcdeghknopqsuvxyz?', 0.56)
+adv('mw', 0.84)
+adv('0123456789$#', 0.6)
+adv('ABCDEFGHJKLNOPQRSTUVXYZ&', 0.68)
+adv('MW%', 0.86)
+adv('-/·•', 0.38)
+adv('–', 0.56)
+adv('—…', 0.92)
+
+/** About how wide a text is in Inter at `size` px: an advance-width table, not a measurement. */
+export const textW = (s: string, size: number, weight = 400) => {
+  let em = 0
+  for (const c of s) em += ADV[c] ?? (c.charCodeAt(0) > 0x2e80 ? 1 : 0.6)
+
+  return em * size * (weight >= 600 ? 1.05 : weight >= 500 ? 1.025 : 1)
+}
+
+/** How much wider than the table a host's font may draw: what `fit` keeps clear, so a cut title never touches what follows it. */
+const SLACK = 1.07
+
+/** Cuts a text to `px` wide at `size`, with an ellipsis. */
+export const fit = (s: string, px: number, size: number, weight = 400) => {
+  if (textW(s, size, weight) * SLACK <= px) return s
+  const chars = Array.from(s)
+  let n = chars.length
+  while (n > 1 && textW(`${chars.slice(0, n).join('').trimEnd()}…`, size, weight) * SLACK > px) n--
+
+  return `${chars.slice(0, n).join('').trimEnd()}…`
+}
+
+/** A text cut to fit, escaped, with the characters the search `words` found bold in the highlight color. */
+export const marked = (s: string, px: number, size: number, words: readonly string[] = [], weight = 400) =>
+  runs(fit(s, px, size, weight), words)
+    .map(r => (r.isHit ? `<tspan font-weight="700" ${paint('hit')}>${esc(r.text)}</tspan>` : esc(r.text)))
+    .join('')
+
+/** Breaks a text into lines of at most `px` at `size`. */
+const wrapLines = (s: string, px: number, size: number) => {
+  const lines: string[] = []
+  let line = ''
+  for (const word of s.split(/\s+/).filter(Boolean)) {
+    const next = line ? `${line} ${word}` : word
+    if (line && textW(next, size) > px) {
+      lines.push(line)
+      line = word
+    } else line = next
+  }
+  if (line) lines.push(line)
+
+  return lines
+}
+
+/* ------------------------------------------------------------------ layout */
+
+/** CSS px per cell of `bodyColumns` on a desktop; a little generous, so a strip fills its slot and is scaled down rather than left short. */
+export const CELL_PX = 8.4
+export const MIN_W = 360
+export const MAX_W = 925
+
+/** The drawing width for a pane `cols` cells wide. */
+export const widthFor = (cols: number) => Math.round(Math.max(MIN_W, Math.min(MAX_W, (cols || 80) * CELL_PX)))
+
+/**
+ * The named anchors of every strip, from its width: the ⋯ slot at the right
+ * edge, the time pill and the ring pill left of it (where task chips end too),
+ * and the x where titles start.
+ */
+export type Layout = {
+  w: number
+  /** Under 560 px: no time column, part columns as icons. */
+  isNarrow: boolean
+  /** Under 460 px: no status chips (the checkbox says it). */
+  isTiny: boolean
+  more: { x: number; w: number }
+  time?: { x: number; w: number }
+  ring: { x: number; w: number }
+  /** Where a row's title starts, and a task's checkbox and title under it. */
+  titleX: number
+  boxX: number
+  taskX: number
+}
+
+export const layout = (w: number, opts: { hasTime?: boolean } = {}): Layout => {
+  const isNarrow = w < 560
+  const isTiny = w < 460
+  const more = { x: w - 40, w: 32 }
+  const time = opts.hasTime !== false && !isNarrow ? { x: more.x - 50, w: 46 } : undefined
+  const ringW = 62
+
+  return {
+    w,
+    isNarrow,
+    isTiny,
+    more,
+    time,
+    ring: { x: (time ? time.x : more.x) - 6 - ringW, w: ringW },
+    titleX: 38,
+    boxX: 38,
+    taskX: 60,
+  }
+}
+
+/* ------------------------------------------------------------------ motion */
 
 /** A toggle that just happened, so its drawing plays the turn once. */
 export type Motion = 'open' | 'close' | undefined
@@ -75,212 +249,209 @@ export type Motion = 'open' | 'close' | undefined
 const EASE = `calcMode="spline" keyTimes="0;1" keySplines="0.2 0 0 1"`
 
 /**
- * The chevron of the reference: a 10 x 5.5 open stroke pointing down when
- * open, turned a quarter to point right when closed. After a toggle it turns
- * between the two in 220 ms on an ease-out curve.
+ * The chevron: an open stroke pointing down when open, right when closed.
+ * Its resting turn is the element's own, so a surface that draws a still
+ * frame shows the right state; after a toggle it turns in 220 ms.
  */
-const chevron = (cx: number, cy: number, isOpen: boolean, motion: Motion, color = '#2a2c36') => {
+const chevron = (cx: number, cy: number, isOpen: boolean, motion: Motion) => {
   const to = isOpen ? 0 : -90
   const from = motion === 'open' ? -90 : motion === 'close' ? 0 : to
   const turn =
     from === to
       ? ''
-      : `<animateTransform attributeName="transform" type="rotate" from="${from} ${cx} ${cy}" to="${to} ${cx} ${cy}" ` +
-        `dur="0.22s" fill="freeze" ${EASE}/>`
+      : `<animateTransform attributeName="transform" type="rotate" from="${from} ${cx} ${cy}" to="${to} ${cx} ${cy}" dur="0.22s" fill="freeze" ${EASE}/>`
 
   return (
-    `<g transform="rotate(${from} ${cx} ${cy})">${turn}` +
-    `<path d="M${cx - 5},${cy - 2.6} L${cx},${cy + 2.6} L${cx + 5},${cy - 2.6}" fill="none" stroke="${color}" ` +
-    `stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></g>`
+    `<g transform="rotate(${to} ${cx} ${cy})">${turn}` +
+    `<path d="M${cx - 4.5},${cy - 2.3} L${cx},${cy + 2.3} L${cx + 4.5},${cy - 2.3}" ${paint(undefined, 'text2')} ` +
+    `stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></g>`
   )
 }
 
-/** Rows a toggle just revealed slide 6 px down into place while fading in, a little after one another. */
+/** Rows a toggle just revealed slide 5 px down into place, one a little after another; at rest they are where they belong. */
 const reveal = (body: string, order: number | undefined) =>
   order === undefined
     ? body
-    : `<g opacity="0"><animate attributeName="opacity" from="0" to="1" begin="${(Math.min(order, 8) * 0.03).toFixed(2)}s" dur="0.2s" fill="freeze" ${EASE}/>` +
-      `<animateTransform attributeName="transform" type="translate" from="0 -6" to="0 0" begin="${(Math.min(order, 8) * 0.03).toFixed(2)}s" dur="0.24s" fill="freeze" ${EASE}/>` +
-      `${body}</g>`
+    : `<g><animateTransform attributeName="transform" type="translate" values="0 -5;0 -5;0 0" keyTimes="0;${Math.min(0.6, Math.min(order, 8) * 0.07).toFixed(2)};1" dur="${(0.22 + Math.min(order, 8) * 0.03).toFixed(2)}s" fill="freeze"/>${body}</g>`
 
-export const SECTION_DOT: Record<SectionId, string> = { working: INK.pink, waiting: INK.gray, done: INK.doneDot }
+/* ------------------------------------------------------------------ marks */
 
-/** Greeting (or a document's title), its subtitle, and the pink line of completions over the last `spanMs` (an hour). */
-export const headerSvg = (
-  name: string,
-  subtitle: string,
-  completions: readonly number[],
-  now: number,
-  heading?: string,
-  spanMs = 60 * 60 * 1000,
-) => {
-  const h = 118
-  const x0 = 664
-  const x1 = 901
-  const yLow = 86
-  const yHigh = 36
-  const span = spanMs
-  const recent = completions.filter(t => now - t <= span).sort((a, b) => a - b)
-  const total = Math.max(1, recent.length)
-  const pts: string[] = [`${x0},${yLow}`]
-  recent.forEach((t, i) => {
-    const x = x0 + ((t - (now - span)) / span) * (x1 - x0)
-    const y = yLow - ((i + 1) / total) * (yLow - yHigh)
-    pts.push(`${x.toFixed(1)},${y.toFixed(1)}`)
-  })
-  const end = recent.length > 0 ? yHigh : yLow
-  pts.push(`${x1},${end}`)
-  let grid = ''
-  for (let gx = 660; gx <= 915; gx += 8) for (let gy = 20; gy <= 100; gy += 8) grid += `<circle cx="${gx}" cy="${gy}" r="0.8"/>`
-  const greeting = heading ?? (name ? `Welcome back, ${name}.` : 'Welcome back.')
+/** A tracked leaf's square: filled with a check when done, a blue dot when in progress, empty otherwise. */
+const checkbox = (x: number, cy: number, status: TaskStatus, size = 14) => {
+  const y = cy - size / 2
+  const r = size * 0.22
+  if (status === 'completed') {
+    const s = size / 14
 
-  return svg(
-    h,
-    `<g fill="#e4e5ea" opacity="0.55">${grid}</g>` +
-      `<text x="6" y="56" font-family="${SERIF}" font-size="39" font-weight="400" fill="${INK.text}" letter-spacing="-0.4">${esc(fit(greeting, 620, 19))}</text>` +
-      `<text x="6" y="92" font-size="20" fill="${INK.sub}">${esc(fit(subtitle, 640, 10))}</text>` +
-      `<polyline points="${pts.join(' ')}" fill="none" stroke="${INK.pink}" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>` +
-      `<circle cx="${x1}" cy="${end}" r="11" fill="${INK.pink}" opacity="0.14"/>` +
-      `<circle cx="${x1}" cy="${end}" r="6" fill="${INK.pink}"/>`,
-  )
+    return (
+      `<rect x="${x}" y="${y}" width="${size}" height="${size}" rx="${r}" ${paint('done')}/>` +
+      `<path d="M${x + 3.5 * s},${y + 7.3 * s} L${x + 6 * s},${y + 9.8 * s} L${x + 10.6 * s},${y + 4.4 * s}" ${paint(undefined, 'onFill')} stroke-width="${(1.8 * s).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/>`
+    )
+  }
+  const outline = `<rect x="${x + 0.75}" y="${y + 0.75}" width="${size - 1.5}" height="${size - 1.5}" rx="${r}" ${paint(undefined, status === 'in_progress' ? 'active' : 'box')} stroke-width="1.5"/>`
+
+  return status === 'in_progress' ? outline + `<circle cx="${x + size / 2}" cy="${cy}" r="${size * 0.2}" ${paint('active')}/>` : outline
 }
 
-/** One status pill of the summary; the picked one is ringed in its dot's color. */
-const pill = (x: number, w: number, bg: string, dot: string | undefined, color: string, label: string, isPicked: boolean) =>
-  `<rect x="${x}" y="65" width="${w}" height="34" rx="17" fill="${bg}"` +
-  (isPicked ? ` stroke="${dot ?? color}" stroke-width="1.6"/>` : '/>') +
-  (dot ? `<circle cx="${x + 23}" cy="82" r="6" fill="${dot}"/>` : '') +
-  `<text x="${x + (dot ? 44 : 20)}" y="89" font-size="19.5" fill="${color}">${esc(label)}</text>`
-
-/** The pills' order, labels and colors: All first, then the three states. */
-const pillSpecs = (c: Counts) =>
-  [
-    { id: 'all', label: `All ${c.total}`, bg: INK.pill, dot: undefined, color: INK.label },
-    { id: 'completed', label: `${c.done} completed`, bg: INK.greenBg, dot: INK.greenDot, color: INK.greenText },
-    { id: 'in_progress', label: `${c.inProgress} in progress`, bg: INK.blueBg, dot: INK.blue, color: INK.blueText },
-    { id: 'pending', label: `${c.notStarted} not started`, bg: INK.grayBg, dot: INK.gray, color: INK.grayText },
-  ] as const
-
-/**
- * Where each pill sits on the card, in its 925 px: the click targets laid over
- * them use the same numbers. The card is 118 tall; the pills span y 65 to 99.
- */
-export const summaryPills = (c: Counts): { id: Filter; x: number; w: number }[] => {
-  let x = 20
-
-  return pillSpecs(c).map(p => {
-    const w = (p.dot ? 62 : 40) + p.label.length * 10.2
-    const at = { id: p.id, x, w }
-    x += w + 18
-
-    return at
-  })
-}
-
-export const SUMMARY_H = 118
-export const PILL_TOP = 65
-export const PILL_H = 34
-
-/** The summary card: percent, bar, task count and the status pills that filter the board. */
-export const summarySvg = (c: Summary, filter: Filter = 'all') => {
-  const h = SUMMARY_H
-  const barX = 133
-  const barW = 642
-  const fillW = c.total === 0 ? 0 : Math.max(15, (c.done / c.total) * barW)
-  const at = summaryPills(c)
-
-  return svg(
-    h,
-    `<rect x="0.5" y="0.5" width="${W - 1}" height="${h - 1}" rx="12" fill="#fff" stroke="${INK.border}"/>` +
-      `<text x="25" y="50" font-size="37" font-weight="500" fill="${INK.text}" letter-spacing="-1">${c.percent}%</text>` +
-      `<rect x="${barX}" y="28" width="${barW}" height="15" rx="7.5" fill="${INK.barTrack}"/>` +
-      (fillW > 0 ? `<rect x="${barX}" y="28" width="${fillW.toFixed(1)}" height="15" rx="7.5" fill="${INK.bar}"/>` : '') +
-      `<text x="${W - 25}" y="44" font-size="19" fill="${INK.label}" text-anchor="end">${c.done}/${c.total} ${c.unit}</text>` +
-      pillSpecs(c)
-        .map((p, i) => pill(at[i]?.x ?? 0, at[i]?.w ?? 0, p.bg, p.dot, p.color, p.label, filter === p.id))
-        .join(''),
-  )
-}
-
-/** The board's own tab bar: each tab's title and percent; the picked one on a gray pill, as the app's own nav. */
-export type TabSpec = { id: string; title: string; percent?: number }
-
-export const TABS_H = 50
-const TAB_TOP = 5
-const TAB_H = 40
-
-/** Where each tab sits on the bar, in its 925 px: the click targets laid over them use the same numbers. */
-export const tabsLayout = (tabs: readonly TabSpec[]) => {
-  let x = 0
-
-  return tabs.map(t => {
-    const pct = t.percent === undefined ? '' : `${t.percent}%`
-    const w = 40 + t.title.length * 10.6 + (pct ? 10 + pct.length * 9.4 : 0)
-    const at = { id: t.id, x, w, top: TAB_TOP, h: TAB_H }
-    x += w + 6
-
-    return at
-  })
-}
-
-/** The scope switch's words, in the order drawn. */
-export const SCOPE_LABEL: Record<Scope, string> = { session: 'Session', project: 'Project', all: 'All' }
-const SCOPE_TOP = 9
-const SCOPE_H = 32
-
-/** Where each option of the scope switch sits, at the bar's right end, in its 925 px. */
-export const scopeLayout = (scopes: readonly Scope[]) => {
-  const ws = scopes.map(sc => 24 + SCOPE_LABEL[sc].length * 8.8)
-  let x = W - 4 - ws.reduce((a, b) => a + b, 0)
-
-  return scopes.map((id, i) => {
-    const at = { id, x, w: ws[i]!, top: SCOPE_TOP, h: SCOPE_H }
-    x += ws[i]!
-
-    return at
-  })
-}
-
-/** The scope switch: one rounded outline, the picked option filled. */
-const scopeSvg = (scopes: readonly Scope[], picked: Scope) => {
-  const at = scopeLayout(scopes)
-  const first = at[0]
-  const last = at[at.length - 1]
-  if (!first || !last) return ''
+/** Aggregate progress: a ring whose arc is the done share; full and green when all is done. */
+const ring = (cx: number, cy: number, done: number, total: number, tone: Tone, r = 6.5) => {
+  const circ = 2 * Math.PI * r
+  if (tone === 'done') return `<circle cx="${cx}" cy="${cy}" r="${r}" ${paint(undefined, 'done')} stroke-width="2.4"/>`
+  const share = total === 0 ? 0 : done / total
+  const f = tone === 'active' ? Math.max(0.1, share) : share
+  const track = `<circle cx="${cx}" cy="${cy}" r="${r}" ${paint(undefined, tone === 'active' ? 'activeTrack' : 'track')} stroke-width="2.4"/>`
+  if (f === 0) return track
 
   return (
-    `<rect x="${first.x}" y="${SCOPE_TOP}" width="${last.x + last.w - first.x}" height="${SCOPE_H}" rx="16" fill="#fff" stroke="${INK.border}"/>` +
-    at
-      .map(o => {
-        const isOn = o.id === picked
-
-        return (
-          (isOn ? `<rect x="${o.x + 3}" y="${SCOPE_TOP + 3}" width="${o.w - 6}" height="${SCOPE_H - 6}" rx="13" fill="#ececee"/>` : '') +
-          `<text x="${o.x + o.w / 2}" y="${SCOPE_TOP + 21}" font-size="15" text-anchor="middle" fill="${isOn ? INK.text : INK.sub}"${
-            isOn ? ' font-weight="500"' : ''
-          }>${SCOPE_LABEL[o.id]}</text>`
-        )
-      })
-      .join('')
+    track +
+    `<circle cx="${cx}" cy="${cy}" r="${r}" ${paint(undefined, 'active')} stroke-width="2.4" stroke-linecap="round" ` +
+    `stroke-dasharray="${(f * circ).toFixed(2)} ${circ.toFixed(2)}" transform="rotate(-90 ${cx} ${cy})"/>`
   )
 }
 
-export const tabsSvg = (tabs: readonly TabSpec[], active: string, scope?: { scopes: readonly Scope[]; picked: Scope }) => {
-  const at = tabsLayout(tabs)
+/** A small pie of done/total: what a part column's count is drawn with. */
+const pie = (cx: number, cy: number, done: number, total: number, r = 5.5) => {
+  const share = total === 0 ? 0 : done / total
+  const base = `<circle cx="${cx}" cy="${cy}" r="${r}" ${paint(share === 1 ? 'done' : undefined, share === 1 ? undefined : 'box')} stroke-width="1.3"/>`
+  if (share <= 0 || share >= 1) return base
+  const a = share * 2 * Math.PI
+  const x = cx + r * Math.sin(a)
+  const y = cy - r * Math.cos(a)
+
+  return base + `<path d="M${cx},${cy} L${cx},${cy - r} A${r},${r} 0 ${share > 0.5 ? 1 : 0} 1 ${x.toFixed(2)},${y.toFixed(2)} Z" ${paint('done')}/>`
+}
+
+/** A part of a line: a small green square with a check when done, an empty square when not, a dash when the line has no such part. */
+const facetMark = (cx: number, cy: number, facet: Facet | undefined) =>
+  !facet
+    ? `<path d="M${cx - 3.5},${cy} L${cx + 3.5},${cy}" ${paint(undefined, 'faint')} stroke-width="1.6" stroke-linecap="round"/>`
+    : checkbox(cx - 6, cy, facet.isDone ? 'completed' : 'pending', 12)
+
+/** The ⋯ of a row that opens its details. */
+const moreDots = (lay: Layout, cy: number) => {
+  const cx = lay.more.x + lay.more.w / 2
+
+  return [-6, 0, 6].map(d => `<circle cx="${cx + d}" cy="${cy}" r="1.6" ${paint('sub')}/>`).join('')
+}
+
+/** A dot after a live title. */
+const liveDot = (x: number, cy: number) => `<circle cx="${x}" cy="${cy}" r="3.5" ${paint('active')}/>`
+
+/* ------------------------------------------------------------------ frames */
+
+const R = 10
+
+/** A whole rounded card outline. */
+const card = (w: number, h: number, fill?: Tok) =>
+  `<rect x="0.5" y="0.5" width="${w - 1}" height="${h - 1}" rx="${R}" ${paint(fill, 'border')}/>`
+
+/**
+ * The card's sides around one row (a row has no fill of its own, so strips
+ * meet without a seam on any background); `isLast` closes it with rounded
+ * corners, `sep` draws the hairline under the row.
+ */
+const frame = (w: number, h: number, isLast: boolean, sep: boolean) => {
+  const sides = isLast
+    ? `<path d="M0.5,-1 L0.5,${h - R} Q0.5,${h - 0.5} ${R},${h - 0.5} L${w - R},${h - 0.5} Q${w - 0.5},${h - 0.5} ${w - 0.5},${h - R} L${w - 0.5},-1" ${paint(undefined, 'border')}/>`
+    : `<path d="M0.5,-1 L0.5,${h + 1} M${w - 0.5},-1 L${w - 0.5},${h + 1}" ${paint(undefined, 'border')}/>`
+
+  return sides + (sep && !isLast ? `<path d="M16,${h - 0.5} L${w - 16},${h - 0.5}" ${paint(undefined, 'sep')}/>` : '')
+}
+
+/* ------------------------------------------------------------------ header */
+
+/**
+ * The greeting (or a document's title), a line of facts under it, and, when
+ * something finished in the span, a step line of those completions with its caption.
+ */
+export const headerSvg = (
+  lay: Layout,
+  o: { heading: string; subtitle: string; completions: readonly number[]; now: number; spanMs: number; caption: string },
+) => {
+  const { w } = lay
+  const h = lay.isNarrow ? 58 : 68
+  const size = lay.isNarrow ? 21 : 26
+  const recent = o.completions.filter(t => o.now - t <= o.spanMs && t <= o.now).sort((a, b) => a - b)
+  const sparkW = recent.length > 0 && !lay.isTiny ? Math.min(180, Math.round(w * 0.28)) : 0
+  const textEnd = w - (sparkW ? sparkW + 24 : 4)
+  let spark = ''
+  if (sparkW) {
+    const x0 = w - sparkW - 4
+    const x1 = w - 8
+    const [yLow, yHigh] = [h - 26, 10]
+    const pts = [`${x0},${yLow}`]
+    let y = yLow
+    recent.forEach((t, i) => {
+      const x = x0 + ((t - (o.now - o.spanMs)) / o.spanMs) * (x1 - x0)
+      pts.push(`${x.toFixed(1)},${y.toFixed(1)}`)
+      y = yLow - ((i + 1) / recent.length) * (yLow - yHigh)
+      pts.push(`${x.toFixed(1)},${y.toFixed(1)}`)
+    })
+    pts.push(`${x1},${y.toFixed(1)}`)
+    spark =
+      `<path d="M${x0},${yLow + 0.5} L${x1},${yLow + 0.5}" ${paint(undefined, 'border')}/>` +
+      `<polyline points="${pts.join(' ')}" ${paint(undefined, 'done')} stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` +
+      `<circle cx="${x1}" cy="${y.toFixed(1)}" r="3.5" ${paint('done')}/>` +
+      `<text x="${x1}" y="${h - 8}" font-size="11" text-anchor="end" ${paint('sub')}>${esc(`${recent.length} done · ${o.caption}`)}</text>`
+  }
 
   return svg(
+    w,
+    h,
+    `<text x="2" y="${lay.isNarrow ? 26 : 32}" font-family="${SERIF}" font-size="${size}" letter-spacing="-0.3" ${paint('text')}>${esc(fit(o.heading, textEnd - 2, size * 0.95))}</text>` +
+      `<text x="2" y="${h - 10}" font-size="13" ${paint('sub')}>${esc(fit(o.subtitle, textEnd - 2, 13))}</text>` +
+      spark,
+  )
+}
+
+/* ------------------------------------------------------------------ tabs */
+
+/** The board's own tab bar: each tab's title and percent; the picked one on a gray pill. */
+export type TabSpec = { id: string; title: string; percent?: number }
+
+export const TABS_H = 36
+
+/** Where each tab sits on the bar: the click targets laid over them use the same numbers. Percents go first when room runs out, then titles shrink. */
+export const tabsLayout = (lay: Layout, tabs: readonly TabSpec[]) => {
+  const gap = 4
+  const titleW = (t: TabSpec) => Math.ceil(textW(t.title, 13, 600) * SLACK)
+  const pctOf = (t: TabSpec) => (t.percent === undefined ? '' : `${t.percent}%`)
+  const widths = (withPct: boolean) => tabs.map(t => 24 + titleW(t) + (withPct && pctOf(t) ? 6 + textW(pctOf(t), 12) : 0))
+  const sum = (ws: number[]) => ws.reduce((a, b) => a + b, 0) + gap * Math.max(0, ws.length - 1)
+  let withPct = true
+  let ws = widths(true)
+  if (sum(ws) > lay.w) {
+    withPct = false
+    ws = widths(false)
+  }
+  const over = sum(ws) - lay.w
+  if (over > 0) ws = ws.map(x => Math.max(44, x - over / ws.length))
+  let x = 0
+
+  return tabs.map((t, i) => {
+    const at = { id: t.id, x, w: ws[i]!, pct: withPct ? pctOf(t) : '' }
+    x += ws[i]! + gap
+
+    return at
+  })
+}
+
+export const tabsSvg = (lay: Layout, tabs: readonly TabSpec[], active: string) => {
+  const at = tabsLayout(lay, tabs)
+
+  return svg(
+    lay.w,
     TABS_H,
-    (scope ? scopeSvg(scope.scopes, scope.picked) : '') +
     tabs
       .map((t, i) => {
-        const { x, w } = at[i] ?? { x: 0, w: 0 }
+        const { x, w, pct } = at[i]!
         const isOn = t.id === active
-        const pct = t.percent === undefined ? '' : `${t.percent}%`
+        const room = w - 24 - (pct ? 6 + textW(pct, 12) : 0)
 
         return (
-          (isOn ? `<rect x="${x}" y="${TAB_TOP}" width="${w}" height="${TAB_H}" rx="12" fill="#ececee"/>` : '') +
-          `<text x="${x + 16}" y="31" font-size="19" fill="${isOn ? INK.text : INK.label}"${isOn ? ' font-weight="500"' : ''}>${esc(t.title)}` +
-          (pct ? `<tspan dx="10" font-size="16" font-weight="400" fill="${INK.sub}">${pct}</tspan>` : '') +
+          (isOn ? `<rect x="${x}" y="4" width="${w}" height="28" rx="8" ${paint('seg')}/>` : '') +
+          `<text x="${x + 12}" y="23" font-size="13" font-weight="${isOn ? 600 : 500}" ${paint(isOn ? 'text' : 'sub')}>${esc(fit(t.title, room, 13, 600))}` +
+          (pct ? `<tspan dx="6" font-size="12" font-weight="400" ${paint('sub')}>${pct}</tspan>` : '') +
           `</text>`
         )
       })
@@ -288,256 +459,374 @@ export const tabsSvg = (tabs: readonly TabSpec[], active: string, scope?: { scop
   )
 }
 
-/** A section's gray header bar with its chevron; a transparent Button lies over the chevron. */
-export const sectionHeadSvg = (
-  id: SectionId,
-  title: string,
-  count: number | string,
-  isOpen: boolean,
-  motion?: Motion,
-  progress?: { done: number; total: number },
-  mark?: readonly string[],
-) => {
-  const h = 44
-  const r = 10
-  const bottom = isOpen
-    ? `L${W - 0.5},${h} L0.5,${h} Z`
-    : `L${W - 0.5},${h - r} Q${W - 0.5},${h - 0.5} ${W - r},${h - 0.5} L${r},${h - 0.5} Q0.5,${h - 0.5} 0.5,${h - r} Z`
-  const path = `M0.5,${r} Q0.5,0.5 ${r},0.5 L${W - r},0.5 Q${W - 0.5},0.5 ${W - 0.5},${r} ${bottom}`
+/* ------------------------------------------------------------------ summary */
 
-  return svg(
-    h,
-    `<path d="${path}" fill="${INK.head}"/>` +
-      chevron(24, 22, isOpen, motion) +
-      `<circle cx="59" cy="22" r="6.5" fill="${SECTION_DOT[id]}"/>` +
-      `<text x="81" y="29" font-size="19" font-weight="500" fill="${INK.text}">${marked(title, progress ? 540 : 650, 10.4, mark)}` +
-      `<tspan dx="12" font-size="18" font-weight="400" fill="${INK.count}">${count}</tspan></text>` +
-      (progress ? sectionBar(progress.done, progress.total, id) : ''),
-  )
-}
+/** The scope switch's words, in the order drawn. */
+export const SCOPE_LABEL: Record<Scope, string> = { session: 'Session', project: 'Project', all: 'All' }
 
-/**
- * The section's own progress, right-aligned with the rows' pills below it:
- * a 6 px bar from x 707 to 845 and the percent ending at the ⋯ column.
- */
-const sectionBar = (done: number, total: number, id: SectionId) => {
-  const share = total === 0 ? 0 : done / total
-  const color = id === 'done' || (total > 0 && done === total) ? INK.bar : id === 'working' ? INK.blue : INK.gray
-  const w = 138
-  const fill = share === 0 ? 0 : Math.max(6, share * w)
+export const SUMMARY_H = 110
+export const PILL_TOP = 72
+export const PILL_H = 26
+export const SCOPE_TOP = 12
+export const SCOPE_H = 30
 
-  return (
-    `<rect x="707" y="19" width="${w}" height="6" rx="3" fill="#e3e5e9"/>` +
-    (fill > 0 ? `<rect x="707" y="19" width="${fill.toFixed(1)}" height="6" rx="3" fill="${color}"/>` : '') +
-    `<text x="${W - 24}" y="28.5" font-size="16.5" fill="${INK.count}" text-anchor="end">${Math.round(share * 100)}%</text>`
-  )
-}
+export type SummaryCounts = { total: number; done: number; inProgress: number; notStarted: number; percent: number }
 
-/** The card's sides around one row; `isLast` closes it with rounded corners. */
-const frame = (h: number, isLast: boolean, sep: boolean) => {
-  const r = 10
-  const sides = isLast
-    ? `<path d="M0.5,0 L0.5,${h - r} Q0.5,${h - 0.5} ${r},${h - 0.5} L${W - r},${h - 0.5} Q${W - 0.5},${h - 0.5} ${W - 0.5},${h - r} L${W - 0.5},0" fill="#fff" stroke="${INK.border}"/>`
-    : `<rect x="0" y="0" width="${W}" height="${h}" fill="#fff"/>` +
-      `<path d="M0.5,0 L0.5,${h} M${W - 0.5},0 L${W - 0.5},${h}" stroke="${INK.border}"/>`
+/** The pills' words and tones: All first, then the three states; shorter words when the card is narrow. */
+const pillSpecs = (c: SummaryCounts, short: boolean) =>
+  [
+    { id: 'all' as Filter, label: `All ${c.total}`, tone: undefined },
+    { id: 'completed' as Filter, label: `${c.done} done`, tone: 'done' as Tone },
+    { id: 'in_progress' as Filter, label: `${c.inProgress} ${short ? 'active' : 'in progress'}`, tone: 'active' as Tone },
+    { id: 'pending' as Filter, label: `${c.notStarted} ${short ? 'to do' : 'not started'}`, tone: 'pending' as Tone },
+  ]
 
-  return sides + (sep && !isLast ? `<path d="M20,${h - 0.5} L${W - 20},${h - 0.5}" stroke="${INK.sep}"/>` : '')
-}
+/** Where each option of the scope switch sits, at the card's top right. */
+export const scopeLayout = (lay: Layout, scopes: readonly Scope[]) => {
+  const ws = scopes.map(sc => Math.ceil(textW(SCOPE_LABEL[sc], 13, 600) + 24))
+  let x = lay.w - 14 - ws.reduce((a, b) => a + b, 0)
 
-/**
- * The progress ring, read the same way as the row's section: a full green
- * ring when done, a blue arc for the done share (a short one while work has
- * no list yet) when working, the bare track when nothing has started.
- */
-const ring = (cx: number, cy: number, c: Counts, section: SectionId) => {
-  const r = 8
-  const circ = 2 * Math.PI * r
-  if (section === 'done' && (c.total === 0 || c.done === c.total)) {
-    return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${INK.green}" stroke-width="3.6"/>`
-  }
-  const share = c.total === 0 ? 0 : c.done / c.total
-  const f = section === 'waiting' && share === 0 ? 0 : Math.max(0.12, share)
-  if (f === 0) return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${INK.blueTrack}" stroke-width="1.8"/>`
-
-  return (
-    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${INK.blueTrack}" stroke-width="1.8"/>` +
-    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${INK.blue}" stroke-width="1.8" stroke-linecap="round" ` +
-    `stroke-dasharray="${(f * circ).toFixed(2)} ${circ.toFixed(2)}" transform="rotate(-90 ${cx} ${cy})"/>`
-  )
-}
-
-const checkbox = (x: number, y: number, state: 'empty' | 'done' | 'mixed' | 'active') =>
-  state === 'mixed'
-    ? `<rect x="${x}" y="${y}" width="22" height="22" rx="4" fill="${INK.check}"/>` +
-      `<path d="M${x + 6},${y + 11} L${x + 16},${y + 11}" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/>`
-    : state === 'done'
-    ? `<rect x="${x}" y="${y}" width="22" height="22" rx="4" fill="${INK.check}"/>` +
-      `<path d="M${x + 5.5},${y + 11.5} L${x + 9.5},${y + 15.5} L${x + 16.5},${y + 7}" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>`
-    : state === 'active'
-      ? `<rect x="${x + 0.75}" y="${y + 0.75}" width="20.5" height="20.5" rx="4" fill="#fff" stroke="${INK.blue}" stroke-width="1.5"/>` +
-        `<circle cx="${x + 11}" cy="${y + 11}" r="4" fill="${INK.blue}"/>`
-      : `<rect x="${x + 0.75}" y="${y + 0.75}" width="20.5" height="20.5" rx="4" fill="#fff" stroke="${INK.box}" stroke-width="1.5"/>`
-
-/** The right-hand pills: ring with done/total, then the time since the last change. */
-const pills = (cy: number, c: Counts, when: string, section: SectionId) =>
-  `<rect x="707" y="${cy - 15}" width="92" height="30" rx="15" fill="${INK.pill}"/>` +
-  ring(727, cy, c, section) +
-  `<text x="774" y="${cy + 6.5}" font-size="19" fill="${INK.text}" text-anchor="middle">${c.done}/${c.total}</text>` +
-  `<rect x="803" y="${cy - 15}" width="52" height="30" rx="15" fill="${INK.pill}"/>` +
-  `<text x="829" y="${cy + 6.5}" font-size="18" fill="${INK.grayText}" text-anchor="middle">${esc(when || '—')}</text>`
-
-/** One agent (or session) row with its chevron; the ⋯ slot (x 872-905) is left for a Button. */
-export const agentRowSvg = (
-  cat: Category,
-  now: number,
-  opts: {
-    isLast: boolean
-    isOpen: boolean
-    motion?: Motion
-    order?: number
-    when?: string
-    mark?: readonly string[]
-    /** Its items' part columns with how many are done: drawn under the columns of its rows. */
-    columns?: readonly ColumnCount[]
-  },
-) => {
-  const h = 64
-  const c = countTasks(cat.tasks)
-  const sub = [cat.kind === 'agent' && cat.agentType ? cat.agentType : '', currentStep(cat)].filter(Boolean).join(' · ')
-  const cols = opts.columns && opts.columns.length > 0 ? facetLayout(opts.columns.map(col => col.key), ROW_TEXT_X) : []
-
-  return svg(
-    h,
-    frame(h, opts.isLast && !opts.isOpen, true) +
-      reveal(
-        chevron(37, 31, opts.isOpen, opts.motion) +
-          checkbox(71, 21, rowCheck(cat)) +
-          `<text x="120" y="29" font-size="18.5" fill="${INK.text}">${marked(cat.title, 570, 9.6, opts.mark)}</text>` +
-          `<text x="120" y="52" font-size="16.5" fill="${INK.sub}">${marked(sub, cols[0] ? cols[0].x - 132 : 560, 8.6, opts.mark)}</text>` +
-          cols.map((at, i) => countCell(at, opts.columns![i]!)).join('') +
-          pills(32, c, opts.when ?? relTime(cat.updatedAt, now), sectionOf(cat)),
-        opts.order,
-      ),
-  )
-}
-
-/** One todo item under an open agent, with the guide line on its left. */
-/** How many of a list's lines have a part done, of those that have it. */
-export type ColumnCount = { key: string; done: number; total: number }
-
-/** Where a group's item rows start their names: what lines its column counts up with them. */
-const ROW_TEXT_X = 166
-
-/** A column's count on its group's row, under the column: a check once all are done, else a ring, then done/total. */
-const countCell = (at: { x: number }, col: ColumnCount) => {
-  const cx = at.x + 11
-  const isAll = col.total > 0 && col.done === col.total
-  const icon = isAll
-    ? `<circle cx="${cx}" cy="47" r="7.5" fill="${INK.green}"/>` +
-      `<path d="M${cx - 3.5},47.5 L${cx - 1},50 L${cx + 3.5},44.5" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
-    : `<circle cx="${cx}" cy="47" r="7" fill="#fff" stroke="${INK.box}" stroke-width="1.5"/>`
-
-  return (
-    icon +
-    `<text x="${at.x + 24}" y="52" font-size="15" fill="${isAll ? INK.greenText : INK.grayText}">${col.done}/${col.total}</text>`
-  )
-}
-
-/** Where a row's part columns end: left of the widest status chip. */
-const FACETS_END = 651
-/** A part column's width: its icon and its word. */
-const facetW = (key: string) => Math.max(64, 34 + key.length * 8.2)
-
-/**
- * Where each part column sits, right-aligned before the status chip; with no
- * room for words (`textX` + 140 px left for the name), each is its icon alone.
- */
-export const facetLayout = (columns: readonly string[], textX: number) => {
-  const full = columns.map(facetW)
-  const total = full.reduce((a, b) => a + b, 0)
-  const ws = FACETS_END - total < textX + 140 ? columns.map(() => 30) : full
-  let x = FACETS_END - ws.reduce((a, b) => a + b, 0)
-
-  return columns.map((key, i) => {
-    const at = { key, x, w: ws[i]!, hasWord: ws[i] !== 30 }
+  return scopes.map((id, i) => {
+    const at = { id, x, w: ws[i]! }
     x += ws[i]!
 
     return at
   })
 }
 
-/** One part's cell: a green check when done, an empty ring when not, and its column's word; a dash when the line has no such part. */
-const facetCell = (at: { key: string; x: number; hasWord: boolean }, facet: Facet | undefined) => {
-  const cx = at.x + 11
-  const icon = !facet
-    ? `<path d="M${cx - 4},18 L${cx + 4},18" stroke="${INK.box}" stroke-width="2" stroke-linecap="round"/>`
-    : facet.isDone
-      ? `<circle cx="${cx}" cy="18" r="9" fill="${INK.green}"/>` +
-        `<path d="M${cx - 4},18.5 L${cx - 1},21.5 L${cx + 4.5},14.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`
-      : `<circle cx="${cx}" cy="18" r="8.25" fill="#fff" stroke="${INK.box}" stroke-width="1.5"/>`
-  const word = at.hasWord
-    ? `<text x="${at.x + 26}" y="23.5" font-size="15" fill="${facet?.isDone ? INK.greenText : INK.grayText}">${esc(at.key)}</text>`
-    : ''
+/** The scope switch: a gray track, the picked option raised on it. */
+const scopeArt = (at: readonly { id: Scope; x: number; w: number }[], picked: Scope) => {
+  const first = at[0]
+  const last = at[at.length - 1]
+  if (!first || !last) return ''
 
-  return icon + word
+  return (
+    `<rect x="${first.x}" y="${SCOPE_TOP}" width="${last.x + last.w - first.x}" height="${SCOPE_H}" rx="8" ${paint('pill')}/>` +
+    at
+      .map(o => {
+        const isOn = o.id === picked
+
+        return (
+          (isOn ? `<rect x="${o.x + 3}" y="${SCOPE_TOP + 3}" width="${o.w - 6}" height="${SCOPE_H - 6}" rx="6" ${paint('seg')}/>` : '') +
+          `<text x="${o.x + o.w / 2}" y="${SCOPE_TOP + 20}" font-size="13" text-anchor="middle" font-weight="${isOn ? 600 : 400}" ${paint(isOn ? 'text' : 'sub')}>${SCOPE_LABEL[o.id]}</text>`
+        )
+      })
+      .join('')
+  )
 }
 
-export const taskRowSvg = (
-  task: Task,
-  now: number,
-  opts: {
+/** Where each pill and scope option sits on the summary card: the click targets use the same numbers. */
+export const summaryLayout = (lay: Layout, c: SummaryCounts, scopes?: readonly Scope[]) => {
+  const place = (short: boolean) => {
+    let x = 16
+
+    return pillSpecs(c, short).map(p => {
+      const w = Math.ceil((p.tone ? 26 : 16) + textW(p.label, 12, 500))
+      const at = { ...p, x, w }
+      x += w + 6
+
+      return at
+    })
+  }
+  let pills = place(false)
+  const last = pills[pills.length - 1]!
+  if (last.x + last.w > lay.w - 16) pills = place(true)
+
+  return { pills, scope: scopeLayout(lay, scopes ?? []) }
+}
+
+/** The summary card: percent, a bar of done and in-progress work, the pills that filter, and (on Agents) the scope switch. */
+export const summarySvg = (lay: Layout, c: SummaryCounts, filter: Filter, unit: string, scope?: { scopes: readonly Scope[]; picked: Scope }) => {
+  const { w } = lay
+  const at = summaryLayout(lay, c, scope?.scopes)
+  const barX = 16
+  const barW = w - 32
+  const doneW = c.done === 0 ? 0 : Math.max(8, (c.done / Math.max(1, c.total)) * barW)
+  const activeW = c.inProgress === 0 ? 0 : Math.max(6, (c.inProgress / Math.max(1, c.total)) * barW)
+  const pct = `${c.percent}%`
+  const metaX = 16 + textW(pct, 28, 600) + 10
+  const meta = `${c.done} of ${c.total} ${unit} done`
+  const metaEnd = at.scope[0] ? at.scope[0].x - 12 : w - 16
+
+  return svg(
+    w,
+    SUMMARY_H,
+    card(w, SUMMARY_H) +
+      `<text x="16" y="42" font-size="28" font-weight="600" letter-spacing="-0.6" ${paint('text')}>${pct}</text>` +
+      (metaEnd - metaX > textW(meta, 12) ? `<text x="${metaX}" y="41" font-size="12" ${paint('sub')}>${esc(meta)}</text>` : '') +
+      (scope ? scopeArt(at.scope, scope.picked) : '') +
+      `<rect x="${barX}" y="54" width="${barW}" height="6" rx="3" ${paint('track')}/>` +
+      (activeW > 0 ? `<rect x="${barX + doneW}" y="54" width="${Math.min(activeW, barW - doneW).toFixed(1)}" height="6" rx="3" ${paint('activeTrack')}/>` : '') +
+      (doneW > 0 ? `<rect x="${barX}" y="54" width="${doneW.toFixed(1)}" height="6" rx="3" ${paint('done')}/>` : '') +
+      at.pills
+        .map(p => {
+          const t = p.tone ? TONE[p.tone] : undefined
+          const isPicked = filter === p.id
+          const cy = PILL_TOP + PILL_H / 2
+
+          return (
+            `<rect x="${p.x + 0.75}" y="${PILL_TOP + 0.75}" width="${p.w - 1.5}" height="${PILL_H - 1.5}" rx="${PILL_H / 2}" ${paint(t?.bg ?? 'pill', isPicked ? (t?.fg ?? 'text2') : undefined)}${isPicked ? ' stroke-width="1.5"' : ''}/>` +
+            (t ? `<circle cx="${p.x + 13}" cy="${cy}" r="3.5" ${paint(t.fg)}/>` : '') +
+            `<text x="${p.x + (t ? 21 : 8)}" y="${cy + 4.2}" font-size="12" font-weight="500" ${paint(t?.text ?? 'text2')}>${esc(p.label)}</text>`
+          )
+        })
+        .join(''),
+  )
+}
+
+/* ------------------------------------------------------------------ columns */
+
+/** How many of a list's lines have a part done, of those that have it. */
+export type ColumnCount = { key: string; done: number; total: number }
+
+/**
+ * Where a section's part columns sit, the same for every group and line in
+ * it: right-aligned before the ring pill. `full` columns carry their word and
+ * count on the group row; `compact` ones are icons (the counts move to the
+ * group's second line); `none` when even icons leave no room for names.
+ */
+export type ColumnPlan = { mode: 'full' | 'compact' | 'none'; cells: { key: string; x: number; w: number }[] }
+
+export const planColumns = (lay: Layout, keys: readonly string[], widest: number): ColumnPlan => {
+  if (keys.length === 0) return { mode: 'none', cells: [] }
+  const end = lay.ring.x - 10
+  const lay2 = (ws: number[]) => {
+    let x = end - ws.reduce((a, b) => a + b, 0)
+
+    return keys.map((key, i) => {
+      const at = { key, x, w: ws[i]! }
+      x += ws[i]!
+
+      return at
+    })
+  }
+  const counter = `${widest}/${widest}`
+  const full = keys.map(k => Math.ceil(28 + textW(`${k} ${counter}`, 12)))
+  if (end - full.reduce((a, b) => a + b, 0) >= lay.taskX + 130) return { mode: 'full', cells: lay2(full) }
+  const icons = keys.map(() => 24)
+  if (end - icons.length * 24 >= lay.taskX + 100) return { mode: 'compact', cells: lay2(icons) }
+
+  return { mode: 'none', cells: [] }
+}
+
+/** A column's count: a pie of done/total, and in a full column its word and numbers; a dash where the list has no such part. */
+const countCell = (at: { x: number }, col: ColumnCount, cy: number, withWords: boolean) =>
+  (col.total === 0 ? facetMark(at.x + 7, cy, undefined) : pie(at.x + 7, cy, col.done, col.total)) +
+  (withWords
+    ? `<text x="${at.x + 17}" y="${cy + 4}" font-size="12" ${paint(col.total === 0 ? 'faint' : col.done === col.total ? 'doneText' : 'sub')}>${esc(col.key)}${col.total === 0 ? '' : ` ${col.done}/${col.total}`}</text>`
+    : '')
+
+/* ------------------------------------------------------------------ sections */
+
+/** A section's gray header: chevron, state dot, title, done/total, and its percent and bar (or its column counts) at the right. */
+export const SECTION_H = 36
+
+export const sectionHeadSvg = (
+  lay: Layout,
+  o: {
+    tone: Tone
+    title: string
+    done: number
+    total: number
+    isOpen: boolean
+    motion?: Motion
+    mark?: readonly string[]
+    plan?: ColumnPlan
+    columns?: readonly ColumnCount[]
+  },
+) => {
+  const { w } = lay
+  const h = SECTION_H
+  const bottom = o.isOpen
+    ? `L${w - 0.5},${h} L0.5,${h} Z`
+    : `L${w - 0.5},${h - R} Q${w - 0.5},${h - 0.5} ${w - R},${h - 0.5} L${R},${h - 0.5} Q0.5,${h - 0.5} 0.5,${h - R} Z`
+  const path = `M0.5,${R} Q0.5,0.5 ${R},0.5 L${w - R},0.5 Q${w - 0.5},0.5 ${w - 0.5},${R} ${bottom}`
+  const share = o.total === 0 ? 0 : o.done / o.total
+  const ringEnd = lay.ring.x + lay.ring.w
+  const hasCols = o.plan && o.plan.mode !== 'none' && o.columns && o.columns.length > 0
+  const barW = lay.isTiny ? 0 : 72
+  const barX = ringEnd - 40 - barW
+  const right = hasCols
+    ? o.plan!.cells.map(c => countCell(c, o.columns!.find(col => col.key === c.key) ?? { key: c.key, done: 0, total: 0 }, h / 2, o.plan!.mode === 'full')).join('')
+    : (barW
+        ? `<rect x="${barX}" y="${h / 2 - 2}" width="${barW}" height="4" rx="2" ${paint('track')}/>` +
+          (share > 0 ? `<rect x="${barX}" y="${h / 2 - 2}" width="${Math.max(4, share * barW).toFixed(1)}" height="4" rx="2" ${paint(TONE[toneOf(o.done, o.total, true)].fg)}/>` : '')
+        : '') + `<text x="${ringEnd}" y="${h / 2 + 4}" font-size="12" text-anchor="end" ${paint('sub')}>${Math.round(share * 100)}%</text>`
+  const titleEnd = (hasCols ? o.plan!.cells[0]!.x : barW ? barX : ringEnd - 40) - 12
+  const count = `${o.done}/${o.total}`
+  const titleRoom = titleEnd - 46 - textW(count, 12) - 8
+
+  return svg(
+    w,
+    h,
+    `<path d="${path}" ${paint('head')}/>` +
+      chevron(18, h / 2, o.isOpen, o.motion) +
+      `<circle cx="34" cy="${h / 2}" r="4" ${paint(TONE[o.tone].fg)}/>` +
+      `<text x="46" y="${h / 2 + 4.5}" font-size="13" font-weight="600" ${paint('text')}>${marked(o.title, titleRoom, 13, o.mark, 600)}` +
+      `<tspan dx="8" font-size="12" font-weight="400" ${paint('sub')}>${count}</tspan></text>` +
+      right,
+  )
+}
+
+/* ------------------------------------------------------------------ rows */
+
+export const ROW_H = 52
+
+/** One agent, session or group row: chevron, title (with a dot while live), its second line, ring pill, time pill and ⋯. */
+export const rowSvg = (
+  lay: Layout,
+  o: {
+    title: string
+    sub: string
+    done: number
+    total: number
+    tone: Tone
+    isLive: boolean
+    isOpen: boolean
     isLast: boolean
-    isPicked: boolean
+    motion?: Motion
     order?: number
     when?: string
-    flat?: boolean
+    hasMore?: boolean
     mark?: readonly string[]
-    /** The list's part columns, and this line's parts, drawn one per column. */
-    columns?: readonly string[]
+    plan?: ColumnPlan
+    columns?: readonly ColumnCount[]
+  },
+) => {
+  const { w } = lay
+  const h = ROW_H
+  const cells = o.plan && o.plan.mode !== 'none' && o.columns ? o.plan.cells : []
+  const end = (cells[0] ? cells[0].x : lay.ring.x) - 12
+  const titleRoom = end - lay.titleX - (o.isLive ? 14 : 0)
+  const title = fit(o.title, titleRoom, 14, 500)
+  const dotX = lay.titleX + textW(title, 14, 500) + 9
+  const counts = `${o.done}/${o.total}`
+
+  return svg(
+    w,
+    h,
+    frame(w, h, o.isLast && !o.isOpen, true) +
+      reveal(
+        chevron(18, 22, o.isOpen, o.motion) +
+          `<text x="${lay.titleX}" y="27" font-size="14" font-weight="500" ${paint('text')}>${marked(title, titleRoom + 20, 14, o.mark, 500)}</text>` +
+          (o.isLive ? liveDot(dotX, 22) : '') +
+          `<text x="${lay.titleX}" y="44" font-size="12" ${paint('sub')}>${marked(o.sub, end - lay.titleX, 12, o.mark)}</text>` +
+          cells.map(c => countCell(c, o.columns!.find(col => col.key === c.key) ?? { key: c.key, done: 0, total: 0 }, 22, o.plan!.mode === 'full')).join('') +
+          `<rect x="${lay.ring.x}" y="10" width="${lay.ring.w}" height="24" rx="12" ${paint('pill')}/>` +
+          ring(lay.ring.x + 14, 22, o.done, o.total, o.tone) +
+          `<text x="${lay.ring.x + lay.ring.w - 10}" y="26.3" font-size="12" font-weight="500" text-anchor="end" ${paint('text')}>${counts}</text>` +
+          (lay.time && o.when !== undefined
+            ? `<rect x="${lay.time.x}" y="10" width="${lay.time.w}" height="24" rx="12" ${paint('pill')}/>` +
+              `<text x="${lay.time.x + lay.time.w / 2}" y="26.3" font-size="12" text-anchor="middle" ${paint('pendingText')}>${esc(o.when || '—')}</text>`
+            : '') +
+          (o.hasMore ? moreDots(lay, 22) : ''),
+        o.order,
+      ),
+  )
+}
+
+export const TASK_H = 32
+
+/** One tracked leaf (a todo item or a checklist line): its square, title, part marks, status chip, time and ⋯. */
+export const taskRowSvg = (
+  lay: Layout,
+  o: {
+    title: string
+    status: TaskStatus
+    isLast: boolean
+    isPicked: boolean
+    /** Right under a section header: no guide line. */
+    flat?: boolean
+    order?: number
+    when?: string
+    isLive?: boolean
+    mark?: readonly string[]
+    plan?: ColumnPlan
     facets?: readonly Facet[]
   },
 ) => {
-  const h = 36
-  const [chip, chipBg, chipText] =
-    task.status === 'completed'
-      ? ['Done', INK.chipDoneBg, INK.chipDoneText]
-      : task.status === 'in_progress'
-        ? ['In progress', INK.blueBg, INK.blueText]
-        : ['Not started', INK.grayBg, INK.grayText]
-  const chipW = 24 + chip.length * 9.2
-  const when = task.status === 'completed' ? task.completedAt : (task.startedAt ?? task.createdAt)
-  const box = task.status === 'completed' ? 'done' : task.status === 'in_progress' ? 'active' : 'empty'
-  const isDone = task.status === 'completed'
-  /** A flat row sits right under a section header: no guide line, aligned with the rows' checkboxes. */
-  const [boxX, textX] = opts.flat ? [71, 120] : [121, ROW_TEXT_X]
-  const time = opts.when ?? (relTime(when, now) || '—')
-  const cols = opts.columns && opts.columns.length > 0 ? facetLayout(opts.columns, textX) : []
-  const titleEnd = cols[0] ? cols[0].x - 12 : 686
+  const { w } = lay
+  const h = TASK_H
+  const cy = h / 2
+  const st = STATUS[o.status]
+  const tone = TONE[st.tone]
+  const chipW = lay.isTiny ? 0 : Math.ceil(textW(st.label, 11, 500) + 16)
+  const chipX = lay.ring.x + lay.ring.w - chipW
+  const cells = o.plan && o.plan.mode !== 'none' ? o.plan.cells : []
+  const end = (cells[0] ? cells[0].x : chipW ? chipX : lay.ring.x + lay.ring.w) - 10
+  const titleRoom = end - lay.taskX - (o.isLive ? 14 : 0)
+  const title = fit(o.title, titleRoom, 13)
+  const isDone = o.status === 'completed'
 
   return svg(
+    w,
     h,
-    frame(h, opts.isLast, false) +
-      (opts.flat ? '' : `<path d="M77.5,0 L77.5,${opts.isLast ? h - 10 : h}" stroke="${INK.sep}" stroke-width="2"/>`) +
+    frame(w, h, o.isLast, false) +
+      (o.flat ? '' : `<path d="M18,0 L18,${o.isLast ? h - 10 : h}" ${paint(undefined, 'sep')} stroke-width="2"/>`) +
       reveal(
-        (opts.isPicked ? `<rect x="64" y="2" width="${W - 84}" height="${h - 4}" rx="6" fill="${INK.blueBg}"/>` : '') +
-          checkbox(boxX, 7, box) +
-          `<text x="${textX}" y="25" font-size="18" fill="${isDone ? '#555965' : INK.text}">${marked(task.title, titleEnd - textX, 8.9, opts.mark)}</text>` +
-          cols.map(at => facetCell(at, opts.facets?.find(f => f.key === at.key))).join('') +
-          `<rect x="${792 - chipW}" y="4" width="${chipW}" height="28" rx="14" fill="${chipBg}"/>` +
-          `<text x="${792 - chipW / 2}" y="24" font-size="16.5" fill="${chipText}" text-anchor="middle">${chip}</text>` +
-          `<text x="829" y="25" font-size="18" fill="${INK.grayText}" text-anchor="middle">${esc(time)}</text>`,
+        (o.isPicked ? `<rect x="28" y="2" width="${w - 36}" height="${h - 4}" rx="6" ${paint('activeBg')}/>` : '') +
+          checkbox(lay.boxX, cy, o.status) +
+          `<text x="${lay.taskX}" y="${cy + 4.5}" font-size="13" ${paint(isDone ? 'sub' : 'text')}>${marked(title, titleRoom + 20, 13, o.mark)}</text>` +
+          (o.isLive ? liveDot(lay.taskX + textW(title, 13) + 9, cy) : '') +
+          cells.map(c => facetMark(c.x + 7, cy, o.facets?.find(f => f.key === c.key))).join('') +
+          (chipW
+            ? `<rect x="${chipX}" y="${cy - 10}" width="${chipW}" height="20" rx="10" ${paint(tone.bg)}/>` +
+              `<text x="${chipX + chipW / 2}" y="${cy + 3.8}" font-size="11" font-weight="500" text-anchor="middle" ${paint(tone.text)}>${st.label}</text>`
+            : '') +
+          (lay.time && o.when !== undefined
+            ? `<text x="${lay.time.x + lay.time.w / 2}" y="${cy + 4}" font-size="12" text-anchor="middle" ${paint('sub')}>${esc(o.when || '—')}</text>`
+            : '') +
+          moreDots(lay, cy),
+        o.order,
+      ),
+  )
+}
+
+export const EMPTY_H = 44
+
+/** The muted line a section or row shows when it has nothing in it; `standalone` draws a whole card, `link` a line to press. */
+export const emptyRowSvg = (
+  lay: Layout,
+  text: string,
+  opts: { isLast?: boolean; indent?: number; order?: number; standalone?: boolean; link?: boolean } = {},
+) => {
+  const h = EMPTY_H
+  const x = opts.indent ?? lay.titleX
+
+  return svg(
+    lay.w,
+    h,
+    (opts.standalone ? card(lay.w, h) : frame(lay.w, h, opts.isLast ?? true, false)) +
+      reveal(
+        `<text x="${x}" y="27" font-size="13"${opts.link ? ' font-weight="500"' : ''} ${paint(opts.link ? 'activeText' : 'sub')}>${esc(fit(text, lay.w - x - 16, 13))}</text>`,
         opts.order,
       ),
   )
 }
 
-/** The muted line a section shows when it has nothing in it. */
-export const emptyRowSvg = (text: string, opts: { isLast?: boolean; indent?: number; order?: number } = {}) => {
-  const h = 48
+/** A whole card with a title and a wrapped line or two: the board's empty state; with the scope switch at its top right. */
+export const noticeSvg = (lay: Layout, title: string, body: string, scope?: { scopes: readonly Scope[]; picked: Scope }) => {
+  const lines = wrapLines(body, lay.w - 40, 13)
+  const at = scope ? scopeLayout(lay, scope.scopes) : []
+  const h = noticeH(lay, body, scope !== undefined)
+  const top = scope ? 30 : 0
 
   return svg(
+    lay.w,
     h,
-    frame(h, opts.isLast ?? true, false) +
-      reveal(`<text x="${opts.indent ?? 71}" y="30" font-size="16" fill="${INK.sub}">${esc(text)}</text>`, opts.order),
+    card(lay.w, h) +
+      (scope ? scopeArt(at, scope.picked) : '') +
+      `<text x="20" y="${32 + (scope && lay.w < 520 ? top + 6 : 0)}" font-size="14" font-weight="600" ${paint('text')}>${esc(title)}</text>` +
+      lines.map((l, i) => `<text x="20" y="${55 + (scope && lay.w < 520 ? top + 6 : 0) + i * 19}" font-size="13" ${paint('sub')}>${esc(l)}</text>`).join(''),
   )
 }
+
+/** How tall the notice card is: the click targets over its scope switch need it. */
+export const noticeH = (lay: Layout, body: string, hasScope: boolean) => {
+  const lines = wrapLines(body, lay.w - 40, 13).length
+
+  return hasScope ? 64 + lines * 19 + (lay.w < 520 ? 36 : 0) : 60 + lines * 19
+}
+
+/** A row's second line: an agent's type, then what it is doing now. */
+export const rowSub = (cat: Category, step: string) => [cat.kind === 'agent' && cat.agentType ? cat.agentType : '', step].filter(Boolean).join(' · ')

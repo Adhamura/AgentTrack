@@ -70,30 +70,43 @@ const facetKey = (label: string) =>
     .replace(/\s+/g, ' ')
     .trim() || label.toLowerCase().trim()
 
-/** A line's name and its parts, when it reads `name — part, part`; the parts are short. */
+/** How many words a part has, its counts in brackets left out: "not dressed (0 props)" is two. */
+const wordsIn = (part: string) => part.replace(/\([^)]*\)/g, ' ').split(/\s+/).filter(Boolean).length
+
+/**
+ * A line's name and its parts, when it reads `name — part, part`; each part
+ * is at most three words. A `**bold**` name is the name whole: the dash is
+ * looked for after it, never inside it, so `**HU.5 — The trail.** Tracks…`
+ * is a name and a note, not parts.
+ */
 export const splitFacets = (body: string): { name: string; facets: Facet[] } | undefined => {
-  const at = /\s+[\u2014\u2013]\s+|\s+--?\s+/.exec(body)
+  const bold = /^\s*\*\*.+?\*\*/.exec(body)
+  const from = bold ? bold[0].length : 0
+  const at = /\s+[\u2014\u2013]\s+|\s+--?\s+/.exec(body.slice(from))
   if (!at) return undefined
-  const name = body.slice(0, at.index).trim()
+  const cut = from + at.index
+  const name = body.slice(0, cut).replace(/\*\*/g, '').trim()
   const parts = body
-    .slice(at.index + at[0].length)
+    .slice(cut + at[0].length)
+    .replace(/\*\*/g, '')
     .replace(/\.$/, '')
     .split(/\s*[,;]\s*/)
     .map(p => p.trim())
     .filter(Boolean)
-  if (!name || parts.length === 0 || parts.length > 6 || parts.some(p => p.length > 40 || p.split(/\s+/).length > 6)) return undefined
+  if (!name || parts.length === 0 || parts.length > 6 || parts.some(p => p.length > 40 || wordsIn(p) > 3)) return undefined
 
   return { name, facets: parts.map(label => ({ key: facetKey(label), label, isDone: !NOT_DONE.test(label) })) }
 }
 
 /**
  * Gives a list's items their parts as columns, when the list is written that
- * way: at least one of its lines has two parts or more (so a lone `— note`
- * stays part of the name).
+ * way: at least half its lines split into parts, and one has two parts or
+ * more (so a lone `— note` stays part of the name).
  */
 const withFacets = (items: DocItem[], bodies: ReadonlyMap<string, string>): DocItem[] => {
   const split = items.map(i => ({ item: i, parts: splitFacets(bodies.get(i.id) ?? '') }))
-  if (!split.some(s => (s.parts?.facets.length ?? 0) >= 2)) return items
+  const parsed = split.filter(s => s.parts !== undefined).length
+  if (parsed * 2 < items.length || !split.some(s => (s.parts?.facets.length ?? 0) >= 2)) return items
 
   return split.map(({ item, parts }) => (parts ? { ...item, title: nameOf(parts.name), facets: parts.facets } : item))
 }
@@ -151,7 +164,7 @@ export const parseDoc = (text: string, tab: DocTab): DocBoard => {
       detail: body.replace(/\*\*/g, '').replace(/`/g, ''),
       status: /x/i.test(mark) ? 'completed' : mark === ' ' ? 'pending' : 'in_progress',
     }
-    bodies.set(entry.id, body.replace(/\*\*/g, '').replace(/`/g, ''))
+    bodies.set(entry.id, body.replace(/`/g, ''))
     ;(group ?? section).items.push(entry)
   }
 
@@ -193,6 +206,17 @@ export const applyLive = (doc: DocBoard, running: readonly string[]): DocBoard =
 }
 
 export const itemsOf = (s: DocSection) => [...s.items, ...s.groups.flatMap(g => g.items)]
+
+/** A section's part columns: one list for all its groups and lines, in the order they first come, so a column stays put. */
+export const sectionColumns = (s: DocSection) => columnsOf(itemsOf(s))
+
+/** Each of `keys` with how many of `items` have that part done, of those that have it. */
+export const countsFor = (items: readonly DocItem[], keys: readonly string[]) =>
+  keys.map(key => {
+    const parts = items.flatMap(i => i.facets?.filter(f => f.key === key) ?? [])
+
+    return { key, done: parts.filter(f => f.isDone).length, total: parts.length }
+  })
 
 /** A group drawn as a board row: the group's items are its tasks. */
 export const groupAsCategory = (
