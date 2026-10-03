@@ -23,12 +23,14 @@ import {
   rowCheck,
   rowItems,
   bar,
+  keepsRow,
+  tasksFor,
 } from './board'
-import type { SectionId, TodoItem } from './board'
+import type { Filter, SectionId, Summary, TodoItem } from './board'
 import { CONFIG_FILE, applyLive, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
 import type { DocTab } from './docs'
 import type { Motion } from './look'
-import { INK, SECTION_DOT, agentRowSvg, emptyRowSvg, headerSvg, sectionHeadSvg, summarySvg, taskRowSvg } from './look'
+import { INK, PILL_H, PILL_TOP, SECTION_DOT, SUMMARY_H, W, agentRowSvg, emptyRowSvg, headerSvg, sectionHeadSvg, summaryPills, summarySvg, taskRowSvg } from './look'
 
 const PANE = 'agent-track'
 const TODO_TOOL = 'mcp__agent-track__todo'
@@ -45,6 +47,7 @@ const docs = atom({ plugin: 'agent-track', key: 'docs' } as const, {} as Record<
 const liveWork = atom({ plugin: 'agent-track', key: 'liveWork' } as const, [] as string[])
 const docHistory = atom({ plugin: 'agent-track', key: 'docHistory' } as const, {} as Record<string, [number, number][]>)
 const toggled = atom({ plugin: 'agent-track', key: 'toggled' } as const, {} as Record<string, { at: number; open: boolean }>)
+const filters = atom({ plugin: 'agent-track', key: 'filter' } as const, {} as Record<string, Filter>)
 
 /** How long after a toggle its drawing still plays the turn. */
 const MOTION_MS = 700
@@ -67,6 +70,90 @@ const C = {
 }
 
 type $ = EngineInterface
+type Els = ReturnType<EngineInterface['ui']['resolve']>
+type SvgEl = Extract<Els, { Svg: unknown }>['Svg']
+
+const pct = (px: number, of: number) => `${Math.round((px * 100) / of)}%`
+const FILTER_ALT: Record<Filter, string> = {
+  all: 'all',
+  completed: 'completed',
+  in_progress: 'in progress',
+  pending: 'not started',
+}
+
+/** The pane's filter, picked by pressing a status pill; pressing the picked one again goes back to All. */
+const pickFilter = ($: $, pane: string, f: Filter) =>
+  update($, filters, all => ({ ...all, [pane]: all[pane] === f ? 'all' : f }))
+
+/**
+ * The drawn summary card with a click target over each status pill: a row laid
+ * over the card whose boxes take the pills' own share of its width and height.
+ */
+const summaryCard = ($: $, els: Els, Art: SvgEl, pane: string, sum: Summary, filter: Filter) => {
+  const { Box, Button } = els
+  const pills = summaryPills(sum)
+  /** Whole percents, rounded at each edge so the cells add up without drifting. */
+  const at = (px: number) => Math.round((px * 100) / W)
+  let end = 0
+  const cells = pills.flatMap(p => {
+    const [from, to] = [at(p.x), at(p.x + p.w)]
+    const gap = from - end
+    end = to
+
+    return [
+      <Box key={`gap-${p.id}`} width={`${gap}%`} />,
+      <Box key={`pill-${pane}-${p.id}`} width={`${to - from}%`} alignItems="center" justifyContent="center">
+        <Button
+          key={`filter-${pane}:${p.id}`}
+          plain
+          label={' '.repeat(Math.max(4, Math.round(p.w / 13)))}
+          onPress={() => pickFilter($, pane, p.id)}
+        />
+      </Box>,
+    ]
+  })
+
+  return (
+    <Box marginY={1} flexDirection="column">
+      <Art
+        source={summarySvg(sum, filter)}
+        alt={`${sum.percent}%: ${sum.done} completed, ${sum.inProgress} in progress, ${sum.notStarted} not started. Showing ${FILTER_ALT[filter]}.`}
+      />
+      <Box position="absolute" left={0} right={0} top={0} bottom={0} flexDirection="column">
+        <Box height={pct(PILL_TOP, SUMMARY_H)} />
+        <Box height={pct(PILL_H, SUMMARY_H)} flexDirection="row">
+          {cells}
+        </Box>
+      </Box>
+    </Box>
+  )
+}
+
+/** The terminal's pills: each a Button, the picked one in brackets. */
+const summaryPillsText = ($: $, els: Els, pane: string, sum: Summary, filter: Filter) => {
+  const { Box, Text, Button } = els
+  const one = (f: Filter, dot: string | undefined, label: string) => (
+    <Box key={`tf-${pane}-${f}`} flexDirection="row" gap={1}>
+      {dot && <Text color={dot}>●</Text>}
+      <Button
+        key={`filter-${pane}:${f}`}
+        plain
+        label={filter === f ? `[${label}]` : label}
+        dimColor={filter !== 'all' && filter !== f}
+        onPress={() => pickFilter($, pane, f)}
+      />
+    </Box>
+  )
+
+  return (
+    <Box flexDirection="row" gap={2}>
+      {one('all', undefined, `All ${sum.total}`)}
+      {one('completed', C.green, `${sum.done} completed`)}
+      {one('in_progress', C.blue, `${sum.inProgress} in progress`)}
+      {one('pending', C.gray, `${sum.notStarted} not started`)}
+    </Box>
+  )
+}
 type Loose = { tool: string; agentId?: string; [k: string]: unknown }
 
 const isUp = async ($: $) => (await $.ui.panes()).some(p => p.id === PANE)
@@ -522,6 +609,15 @@ export const register: Register = (on, options) => {
     const shut = new Set(await read($, collapsed))
     const pick = await read($, selected)
     const sum = summarize(b)
+    const filter = (await read($, filters))[PANE] ?? 'all'
+    const isFiltered = filter !== 'all'
+    /** Under a filter sections and rows start open, so the matching tasks show; their own keys flip that. */
+    const sectionKey = (id: string) => (isFiltered ? `sf:${id}` : `s:${id}`)
+    const foldKey = (id: string) => (isFiltered ? `of:${id}` : `o:${id}`)
+    const isRowOpen = (id: string) => shut.has(foldKey(id)) !== isFiltered
+    const shownSections = grouped(b)
+      .map(section => ({ ...section, categories: section.categories.filter(cat => keepsRow(cat, filter)) }))
+      .filter(section => !isFiltered || section.categories.length > 0)
 
     const flips = await read($, toggled)
     /** Flips one section or agent; `open` is the state it lands in, so the turn plays only once the flip is drawn. */
@@ -543,8 +639,8 @@ export const register: Register = (on, options) => {
     if (Svg) {
       const Art = Svg
       const pickBy = (key: string) => update($, selected, cur => (cur === key ? null : key))
-      const sections = grouped(b)
-      const working = sections.find(s => s.id === 'working')?.categories.length ?? 0
+      const sections = shownSections
+      const working = grouped(b).find(s => s.id === 'working')?.categories.length ?? 0
       const subtitle =
         working > 0
           ? 'Working on things! I’ll ping you.'
@@ -626,15 +722,13 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column">
           <Art source={headerSvg(name, subtitle, completions, now)} alt={`Welcome back${name ? `, ${name}` : ''}. ${subtitle}`} />
-          <Box marginY={1}>
-            <Svg
-              source={summarySvg(sum)}
-              alt={`${sum.percent}%: ${sum.done} completed, ${sum.inProgress} in progress, ${sum.notStarted} not started`}
-            />
-          </Box>
+          {summaryCard($, els, Art, PANE, sum, filter)}
           {detail}
+          {isFiltered && sections.length === 0 && (
+            <Art source={emptyRowSvg(`Nothing ${FILTER_ALT[filter]}.`)} alt={`Nothing ${FILTER_ALT[filter]}.`} />
+          )}
           {sections.map(section => {
-            const key = `s:${section.id}`
+            const key = sectionKey(section.id)
             const isOpen = !shut.has(key)
             const count = section.categories.length
             const sectionMotion = motionOf(key, isOpen)
@@ -654,8 +748,9 @@ export const register: Register = (on, options) => {
                 )}
                 {isOpen &&
                   section.categories.flatMap((cat, i) => {
-                    const fold = `o:${cat.id}`
-                    const isExpanded = shut.has(fold)
+                    const fold = foldKey(cat.id)
+                    const isExpanded = isRowOpen(cat.id)
+                    const tasksShown = tasksFor(cat, filter)
                     const isLast = i === count - 1
                     const foldMotion = motionOf(fold, isExpanded)
                     const row = strip(
@@ -672,7 +767,9 @@ export const register: Register = (on, options) => {
                     )
                     if (!isExpanded) return [row]
                     const reveal = foldMotion === 'open'
-                    if (cat.tasks.length === 0) {
+                    if (tasksShown.length === 0) {
+                      if (isFiltered) return [row]
+
                       return [
                         row,
                         <Art
@@ -682,11 +779,11 @@ export const register: Register = (on, options) => {
                         />,
                       ]
                     }
-                    const tasks = cat.tasks.map((task, j) =>
+                    const tasks = tasksShown.map((task, j) =>
                       strip(
                         `row-${cat.id}::${task.id}`,
                         taskRowSvg(task, now, {
-                          isLast: isLast && j === cat.tasks.length - 1,
+                          isLast: isLast && j === tasksShown.length - 1,
                           isPicked: pick === `${cat.id}::${task.id}`,
                           order: reveal ? j : undefined,
                         }),
@@ -736,11 +833,7 @@ export const register: Register = (on, options) => {
             {sum.done}/{sum.total} {sum.unit}
           </Text>
         </Box>
-        <Box flexDirection="row" gap={2}>
-          <Text color={C.green}>● {sum.done} completed</Text>
-          <Text color={C.blue}>● {sum.inProgress} in progress</Text>
-          <Text color={C.gray}>● {sum.notStarted} not started</Text>
-        </Box>
+        {summaryPillsText($, els, PANE, sum, filter)}
       </Box>
     )
 
@@ -769,8 +862,8 @@ export const register: Register = (on, options) => {
 
     const agentRow = (cat: Category) => {
       const c = countTasks(cat.tasks)
-      const key = `o:${cat.id}`
-      const isOpen = shut.has(key)
+      const key = foldKey(cat.id)
+      const isOpen = isRowOpen(cat.id)
       const live = cat.isLive && !cat.isFinished
       const color = c.total > 0 && c.done === c.total ? C.green : C.blue
 
@@ -802,13 +895,13 @@ export const register: Register = (on, options) => {
               {currentStep(cat)}
             </Text>
           </Box>
-          {isOpen && cat.tasks.map(task => taskRow(cat, task))}
+          {isOpen && tasksFor(cat, filter).map(task => taskRow(cat, task))}
         </Box>
       )
     }
 
-    const sections = grouped(b).map(section => {
-      const key = `s:${section.id}`
+    const sections = shownSections.map(section => {
+      const key = sectionKey(section.id)
       const isOpen = !shut.has(key)
 
       return (
@@ -892,6 +985,8 @@ export const register: Register = (on, options) => {
         {summary}
         {b.categories.length === 0 ? (
           <Text dimColor>No agents have a todo list yet. They show up here as soon as one does.</Text>
+        ) : isFiltered && sections.length === 0 ? (
+          <Text dimColor>Nothing {FILTER_ALT[filter]}.</Text>
         ) : (
           sections
         )}
@@ -926,9 +1021,26 @@ export const register: Register = (on, options) => {
 
       return isLive || c.done + c.inProgress > 0 ? 'working' : 'waiting'
     }
-    /** Sections start open unless finished; groups start closed. A key in `collapsed` flips the default. */
-    const sectionOpen = (sid: string, state: SectionId) => (state !== 'done') !== shut.has(`d:${pane}:${sid}`)
-    const groupOpen = (gid: string) => shut.has(`g:${pane}:${gid}`)
+    const filter = (await read($, filters))[pane] ?? 'all'
+    const isFiltered = filter !== 'all'
+    const fits = (item: DocItem) => !isFiltered || item.status === filter
+    /**
+     * Sections start open unless finished; groups start closed. Under a filter
+     * both start open, on keys of their own. A key in `collapsed` flips the default.
+     */
+    const sectionKey = (sid: string) => (isFiltered ? `df:${pane}:${sid}` : `d:${pane}:${sid}`)
+    const groupKey = (gid: string) => (isFiltered ? `gf:${pane}:${gid}` : `g:${pane}:${gid}`)
+    const sectionOpen = (sid: string, state: SectionId) => (isFiltered || state !== 'done') !== shut.has(sectionKey(sid))
+    const groupOpen = (gid: string) => shut.has(groupKey(gid)) !== isFiltered
+    /** The sections and groups the filter leaves, each with only its matching items. */
+    const shown = doc.sections
+      .map(section => ({
+        section,
+        items: section.items.filter(fits),
+        groups: section.groups.map(g => ({ group: g, items: g.items.filter(fits) })).filter(g => !isFiltered || g.items.length > 0),
+      }))
+      .filter(v => !isFiltered || v.items.length > 0 || v.groups.length > 0)
+    const nothing = `Nothing ${FILTER_ALT[filter]}.`
     const toggle = async (key: string, open: boolean) => {
       const at = await $.clock.now()
       await update($, toggled, list => ({
@@ -1000,27 +1112,23 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column">
           <Art source={headerSvg('', subtitle, steps, now, doc.title, DOC_SPAN)} alt={`${doc.title}. ${subtitle}`} />
-          <Box marginY={1}>
-            <Art
-              source={summarySvg(sum)}
-              alt={`${sum.percent}%: ${sum.done} completed, ${sum.inProgress} in progress, ${sum.notStarted} not started`}
-            />
-          </Box>
+          {summaryCard($, els, Art, pane, sum, filter)}
           {detail}
-          {doc.sections.map(section => {
+          {isFiltered && shown.length === 0 && <Art source={emptyRowSvg(nothing)} alt={nothing} />}
+          {shown.map(({ section, items: ownItems, groups }) => {
             const items = itemsOf(section)
             const state = stateOf(items, section.isLive)
-            const key = `d:${pane}:${section.id}`
+            const key = sectionKey(section.id)
             const isOpen = sectionOpen(section.id, state)
             const sectionMotion = motionOf(key, isOpen)
             const c = countTasks(items.map(asTask))
             const rows: JSX.Element[] = []
             if (isOpen) {
-              section.items.forEach((item, j) =>
+              ownItems.forEach((item, j) =>
                 rows.push(
                   strip(
                     taskRowSvg(asTask(item), now, {
-                      isLast: section.groups.length === 0 && j === section.items.length - 1,
+                      isLast: groups.length === 0 && j === ownItems.length - 1,
                       isPicked: pick === `${pane}::${item.id}`,
                       order: sectionMotion === 'open' ? j : undefined,
                       when: '',
@@ -1032,11 +1140,11 @@ export const register: Register = (on, options) => {
                   ),
                 ),
               )
-              section.groups.forEach((group, j) => {
-                const gkey = `g:${pane}:${group.id}`
+              groups.forEach(({ group, items: groupItems }, j) => {
+                const gkey = groupKey(group.id)
                 const gOpen = groupOpen(group.id)
                 const gMotion = motionOf(gkey, gOpen)
-                const isLast = j === section.groups.length - 1
+                const isLast = j === groups.length - 1
                 const cat = groupAsCategory(group.id, group.title, group.items, doc.updatedAt, group.isLive)
                 const gc = countTasks(cat.tasks)
                 rows.push(
@@ -1045,7 +1153,7 @@ export const register: Register = (on, options) => {
                       isLast,
                       isOpen: gOpen,
                       motion: gMotion,
-                      order: sectionMotion === 'open' ? section.items.length + j : undefined,
+                      order: sectionMotion === 'open' ? ownItems.length + j : undefined,
                       when: `${gc.percent}%`,
                     }),
                     `${group.title}: ${gc.done}/${gc.total}, ${gOpen ? 'expanded' : 'collapsed'}`,
@@ -1053,11 +1161,11 @@ export const register: Register = (on, options) => {
                   ),
                 )
                 if (gOpen) {
-                  group.items.forEach((item, k) =>
+                  groupItems.forEach((item, k) =>
                     rows.push(
                       strip(
                         taskRowSvg(asTask(item), now, {
-                          isLast: isLast && k === group.items.length - 1,
+                          isLast: isLast && k === groupItems.length - 1,
                           isPicked: pick === `${pane}::${item.id}`,
                           order: gMotion === 'open' ? k : undefined,
                           when: '',
@@ -1124,15 +1232,12 @@ export const register: Register = (on, options) => {
             {sum.done}/{sum.total} tasks
           </Text>
         </Box>
-        <Box flexDirection="row" gap={2} marginBottom={1}>
-          <Text color={C.green}>● {sum.done} completed</Text>
-          <Text color={C.blue}>● {sum.inProgress} in progress</Text>
-          <Text color={C.gray}>● {sum.notStarted} not started</Text>
-        </Box>
-        {doc.sections.map(section => {
+        <Box marginBottom={1}>{summaryPillsText($, els, pane, sum, filter)}</Box>
+        {isFiltered && shown.length === 0 && <Text dimColor>{nothing}</Text>}
+        {shown.map(({ section, items: ownItems, groups }) => {
           const items = itemsOf(section)
           const state = stateOf(items, section.isLive)
-          const key = `d:${pane}:${section.id}`
+          const key = sectionKey(section.id)
           const isOpen = sectionOpen(section.id, state)
           const c = countTasks(items.map(asTask))
 
@@ -1155,10 +1260,10 @@ export const register: Register = (on, options) => {
                   {c.done}/{c.total}
                 </Text>
               </Box>
-              {isOpen && section.items.map(item => itemRow(item, 4))}
+              {isOpen && ownItems.map(item => itemRow(item, 4))}
               {isOpen &&
-                section.groups.map(group => {
-                  const gkey = `g:${pane}:${group.id}`
+                groups.map(({ group, items: groupItems }) => {
+                  const gkey = groupKey(group.id)
                   const gOpen = groupOpen(group.id)
                   const gc = countTasks(group.items.map(asTask))
 
@@ -1181,7 +1286,7 @@ export const register: Register = (on, options) => {
                           {gc.done}/{gc.total}
                         </Text>
                       </Box>
-                      {gOpen && group.items.map(item => itemRow(item, 4))}
+                      {gOpen && groupItems.map(item => itemRow(item, 4))}
                     </Box>
                   )
                 })}

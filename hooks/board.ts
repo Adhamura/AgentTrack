@@ -238,6 +238,26 @@ export const sectionOf = (cat: Category): SectionId => {
   return 'waiting'
 }
 
+/** Which status the summary's pills narrow the board to; `all` shows everything. */
+export type Filter = 'all' | TaskStatus
+
+export const FILTERS: readonly Filter[] = ['all', 'completed', 'in_progress', 'pending']
+
+/** The status a row without a todo list stands for: the state its section shows. */
+const rowStatus = (cat: Category): TaskStatus => {
+  const section = sectionOf(cat)
+
+  return section === 'done' ? 'completed' : section === 'working' ? 'in_progress' : 'pending'
+}
+
+/** Whether a row stays on the board under the filter: it has a matching task, or is itself in that state. */
+export const keepsRow = (cat: Category, filter: Filter) =>
+  filter === 'all' || (cat.tasks.length > 0 ? cat.tasks.some(t => t.status === filter) : rowStatus(cat) === filter)
+
+/** The tasks a row shows under the filter. */
+export const tasksFor = (cat: Category, filter: Filter) =>
+  filter === 'all' ? cat.tasks : cat.tasks.filter(t => t.status === filter)
+
 export const grouped = (board: Board) =>
   SECTIONS.map(section => ({
     ...section,

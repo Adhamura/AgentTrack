@@ -95,6 +95,8 @@ declare module 'claude-code' {
       docHistory: Record<string, [number, number][]>
       /** Titles of what runs in this session now: agents, and todo items in progress. */
       liveWork: string[]
+      /** Each pane's status filter, picked from the summary's pills: all, or one task status. */
+      filter: Record<string, 'all' | TaskStatus>
     }
   }
 }

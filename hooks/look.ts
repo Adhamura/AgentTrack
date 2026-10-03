@@ -5,7 +5,7 @@
  * over the blank slots these leave for them.
  */
 import type { Category, Task } from '../types'
-import type { Counts, SectionId, Summary } from './board'
+import type { Counts, Filter, SectionId, Summary } from './board'
 import { countTasks, currentStep, relTime, rowCheck, sectionOf } from './board'
 
 export const W = 925
@@ -133,22 +133,49 @@ export const headerSvg = (
   )
 }
 
-const pill = (x: number, w: number, bg: string, dot: string, color: string, label: string) =>
-  `<rect x="${x}" y="65" width="${w}" height="34" rx="17" fill="${bg}"/>` +
-  `<circle cx="${x + 23}" cy="82" r="6" fill="${dot}"/>` +
-  `<text x="${x + 44}" y="89" font-size="19.5" fill="${color}">${esc(label)}</text>`
+/** One status pill of the summary; the picked one is ringed in its dot's color. */
+const pill = (x: number, w: number, bg: string, dot: string | undefined, color: string, label: string, isPicked: boolean) =>
+  `<rect x="${x}" y="65" width="${w}" height="34" rx="17" fill="${bg}"` +
+  (isPicked ? ` stroke="${dot ?? color}" stroke-width="1.6"/>` : '/>') +
+  (dot ? `<circle cx="${x + 23}" cy="82" r="6" fill="${dot}"/>` : '') +
+  `<text x="${x + (dot ? 44 : 20)}" y="89" font-size="19.5" fill="${color}">${esc(label)}</text>`
 
-/** The summary card: percent, bar, task count and the three status pills. */
-export const summarySvg = (c: Summary) => {
-  const h = 118
+/** The pills' order, labels and colors: All first, then the three states. */
+const pillSpecs = (c: Counts) =>
+  [
+    { id: 'all', label: `All ${c.total}`, bg: INK.pill, dot: undefined, color: INK.label },
+    { id: 'completed', label: `${c.done} completed`, bg: INK.greenBg, dot: INK.greenDot, color: INK.greenText },
+    { id: 'in_progress', label: `${c.inProgress} in progress`, bg: INK.blueBg, dot: INK.blue, color: INK.blueText },
+    { id: 'pending', label: `${c.notStarted} not started`, bg: INK.grayBg, dot: INK.gray, color: INK.grayText },
+  ] as const
+
+/**
+ * Where each pill sits on the card, in its 925 px: the click targets laid over
+ * them use the same numbers. The card is 118 tall; the pills span y 65 to 99.
+ */
+export const summaryPills = (c: Counts): { id: Filter; x: number; w: number }[] => {
+  let x = 20
+
+  return pillSpecs(c).map(p => {
+    const w = (p.dot ? 62 : 40) + p.label.length * 10.2
+    const at = { id: p.id, x, w }
+    x += w + 18
+
+    return at
+  })
+}
+
+export const SUMMARY_H = 118
+export const PILL_TOP = 65
+export const PILL_H = 34
+
+/** The summary card: percent, bar, task count and the status pills that filter the board. */
+export const summarySvg = (c: Summary, filter: Filter = 'all') => {
+  const h = SUMMARY_H
   const barX = 133
   const barW = 642
   const fillW = c.total === 0 ? 0 : Math.max(15, (c.done / c.total) * barW)
-  const labels = [`${c.done} completed`, `${c.inProgress} in progress`, `${c.notStarted} not started`]
-  const widths = labels.map(l => 62 + l.length * 10.2)
-  const x1 = 20
-  const x2 = x1 + (widths[0] ?? 0) + 18
-  const x3 = x2 + (widths[1] ?? 0) + 18
+  const at = summaryPills(c)
 
   return svg(
     h,
@@ -157,9 +184,9 @@ export const summarySvg = (c: Summary) => {
       `<rect x="${barX}" y="28" width="${barW}" height="15" rx="7.5" fill="${INK.barTrack}"/>` +
       (fillW > 0 ? `<rect x="${barX}" y="28" width="${fillW.toFixed(1)}" height="15" rx="7.5" fill="${INK.bar}"/>` : '') +
       `<text x="${W - 25}" y="44" font-size="19" fill="${INK.label}" text-anchor="end">${c.done}/${c.total} ${c.unit}</text>` +
-      pill(x1, widths[0] ?? 0, INK.greenBg, INK.greenDot, INK.greenText, labels[0] ?? '') +
-      pill(x2, widths[1] ?? 0, INK.blueBg, INK.blue, INK.blueText, labels[1] ?? '') +
-      pill(x3, widths[2] ?? 0, INK.grayBg, INK.gray, INK.grayText, labels[2] ?? ''),
+      pillSpecs(c)
+        .map((p, i) => pill(at[i]?.x ?? 0, at[i]?.w ?? 0, p.bg, p.dot, p.color, p.label, filter === p.id))
+        .join(''),
   )
 }
 

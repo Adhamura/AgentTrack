@@ -6,7 +6,7 @@ A live progress board for Claude Code. Every session, every subagent and every t
 
 ## What it shows
 
-- **Summary**: overall percent, a progress bar, and how many tasks are completed, in progress and not started.
+- **Summary**: overall percent, a progress bar, and how many tasks are completed, in progress and not started. The pills are filters: press one to show only those tasks, or **All** to see everything again.
 - **Sections**: Working, Not started and Done, each with a colored dot, a count, and a chevron that opens and closes it with a short animation.
 - **One row per session or subagent**: its title, what it is doing right now, a progress ring with done/total, and how long ago it last changed. New subagents appear the moment they start.
 - **Tasks** under each row, from the agent's todo list, with a status chip. The ⋯ button opens a details box with when each task was created, started and finished, and how long it took.

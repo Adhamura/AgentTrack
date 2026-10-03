@@ -204,3 +204,71 @@ test('the Progress button above the message box opens the board', async ($, on) 
   expect(opened.filter(id => id === 'agent-track').length).toBe(2)
 })
 
+
+test('the summary pills filter the board by status, with All as the way back', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  on('tool.call', () => ({ result: null, text: 'ok' }))
+  on('agent.list', () => ({ value: [] }))
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  await $.tool.call({
+    tool: 'TodoWrite',
+    todos: [
+      { content: 'Read', status: 'completed' },
+      { content: 'Draw', status: 'in_progress' },
+      { content: 'Test', status: 'pending' },
+    ],
+  } as never)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'agent-track', surface, ...PANE, props: paneProps as never })
+    expect(await ui.find({ key: 'filter-agent-track:all' })).toBeDefined()
+    expect(await ui.find({ key: 'task-main::t1' })).toBeUndefined()
+
+    await ui.press({ key: 'filter-agent-track:completed' })
+    expect(await ui.find({ key: 'task-main::t1' })).toBeDefined()
+    expect(await ui.find({ key: 'task-main::t2' })).toBeUndefined()
+
+    await ui.press({ key: 'filter-agent-track:pending' })
+    expect(await ui.find({ key: 'task-main::t3' })).toBeDefined()
+    expect(await ui.find({ key: 'task-main::t1' })).toBeUndefined()
+
+    await ui.press({ key: 'filter-agent-track:all' })
+    expect(await ui.find({ key: 'task-main::t1' })).toBeUndefined()
+    expect(await ui.find({ key: 'head-working' })).toBeDefined()
+    await ui.unmount()
+  }
+
+})
+
+test('a project tab filters its checklist the same way', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  on('agent.list', () => ({ value: [] }))
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  const roadmap = ['## Hunt', '### Keys', '- [x] HU.1 First', '- [ ] HU.2 Second', '## Done part', '- [x] HU.0 Zero'].join('\n')
+  on('fs.read', ($, e) => ({
+    value: e.path.endsWith('agent-track.json') ? JSON.stringify({ tabs: [{ title: 'Roadmap', file: 'r.md' }] }) : roadmap,
+  }))
+  on('fs.stat', () => ({ value: { kind: 'file', mtimeMs: 1000, size: 1, realPath: '/p' } as never }))
+  on('fs.list', () => ({ value: [] }))
+  on('store.get', () => ({ value: undefined }))
+  on('tool.register', () => ({ value: { tool: 'mcp__agent-track__todo' } }))
+  on('command.register', () => ({ value: { command: 'agent-track' } }))
+  on('session.start', ($, e) => e as never)
+  on('env.get', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'me' }))
+  await $.session.start({ cwd: '/p', surface: 'terminal', isInteractive: true } as never)
+  const pane = { component: 'Pane', requestId: 'agent-track-roadmap' } as const
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'agent-track', surface, ...pane, props: paneProps as never })
+    const ids = async () => (await ui.findAll({ type: 'Button' })).map(b => String(b.key)).filter(k => k.startsWith('item-'))
+    expect(await ids()).toEqual([])
+    await ui.press({ key: 'filter-agent-track-roadmap:pending' })
+    expect((await ids()).length).toBe(1)
+    expect(await ui.find({ key: 'head-agent-track-roadmap:done-part' })).toBeUndefined()
+    await ui.press({ key: 'filter-agent-track-roadmap:pending' })
+    expect(await ids()).toEqual([])
+    await ui.unmount()
+  }
+})
