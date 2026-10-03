@@ -388,3 +388,35 @@ test('project checklists are tabs inside the one board pane, each filtering on i
     await ui.unmount()
   }
 })
+
+test('a board left open over a reload is seated and drawn again', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const opened: string[] = []
+  const invalidated: string[] = []
+  on('agent.list', () => ({ value: [] }))
+  on('ui.panes', () => ({ value: [{ id: 'agent-track', title: 'Progress', isShown: true, isFocused: false, isPlaced: true }] as never }))
+  on('ui.open', ($, e) => {
+    opened.push(e.id)
+
+    return { value: { isPlaced: true } }
+  })
+  on('ui.invalidate', ($, e) => {
+    invalidated.push(String(e.event))
+
+    return { value: undefined }
+  })
+  on('fs.read', () => ({ value: '' }))
+  on('fs.stat', () => ({ value: undefined as never }))
+  on('fs.list', () => ({ value: [] }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }) as never)
+  on('tool.register', () => ({ value: { tool: 'mcp__agent-track__todo' } }))
+  on('command.register', () => ({ value: { command: 'agent-track' } }))
+  on('session.start', ($, e) => e as never)
+  on('env.get', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'me' }))
+  await $.session.start({ cwd: '/p', surface: 'desktop', isInteractive: true } as never)
+  for (let i = 0; i < 20 && invalidated.length === 0; i++) await Promise.resolve()
+  expect(opened).toContain('agent-track')
+  expect(invalidated).toContain('ui.render')
+})

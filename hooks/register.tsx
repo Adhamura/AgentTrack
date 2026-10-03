@@ -1400,6 +1400,34 @@ const pressCheckUpdates = async ($: $) => {
   $.ui.toast(await checkAndReload($))
 }
 
+/** When the board is drawn again after a load: at once, and again as a slower surface catches up. */
+const REDRAW_AFTER_LOAD_MS = [0, 1_500, 5_000] as const
+
+/**
+ * Draws a board that stayed open over a reload (Check updates, `/reload-plugins`)
+ * again. The pane is the engine's and outlives the module, but a surface may
+ * keep waiting for a drawing from the new one ("has not drawn in this pane"):
+ * opening it again seats it, and an invalidate asks every surface for one.
+ */
+const redrawAfterLoad = async ($: $) => {
+  if (!(await isUp($))) return
+  await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
+  let waited = 0
+  for (const at of REDRAW_AFTER_LOAD_MS) {
+    if (at > waited) await $.clock.sleep(at - waited)
+    waited = at
+    $.ui.invalidate('ui.render')
+  }
+}
+
+/** What the board draws when drawing it failed: the reason, never a blank pane. */
+const failedText = (els: Els, err: unknown) => (
+  <els.Text color={INK.sub}>
+    Agent Track could not draw this tab: {err instanceof Error ? err.message : String(err)}. Press ▦ Progress twice to
+    open it again.
+  </els.Text>
+)
+
 export const register: Register = (on, options) => {
   userName = typeof options.name === 'string' ? options.name.trim() : ''
 
@@ -1441,6 +1469,8 @@ export const register: Register = (on, options) => {
     await refreshDocs($, true)
     await closeOldTabs($)
     if (docCtx.tabs.length > 0) await autoOpen($)
+    // An unload (the next reload) ends its waits: nothing is left to draw then.
+    void redrawAfterLoad($).catch(() => undefined)
     $.clock.every(3_000, () => {
       void refreshDocs($)
       void refreshLive($)
@@ -1637,26 +1667,35 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  /** The one board pane: its own tabs (Agents, then each project checklist) and the picked tab below them. */
+  /** The one board pane: its own tabs (each project checklist, then Agents) and the picked tab below them. */
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    paneColumns = e.props.bodyColumns
-    const els = $.ui.resolve(e)
-    const { Box, Text } = els
-    const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
-    const tabs = await tabList($)
-    const picked = await read($, view)
-    const active = tabs.find(t => t.id === picked) ?? tabs[0]!
-    const body =
-      active.id === PANE
-        ? await drawAgents($, e)
-        : ((await drawDoc($, e, active.id)) ?? <Text dimColor>Loading {active.title}…</Text>)
-    if (tabs.length < 2) return body
-
-    return (
-      <Box flexDirection="column">
-        {Svg ? tabStrip($, els, Svg, tabs, active.id) : tabRowText($, els, tabs, active.id)}
-        {body}
-      </Box>
-    )
+    try {
+      return await drawBoard($, e)
+    } catch (err) {
+      return failedText($.ui.resolve(e), err)
+    }
   })
+}
+
+/** The board pane's drawing: the tab bar, and the picked tab below it. */
+const drawBoard = async ($: $, e: RenderInput<'Pane'>) => {
+  paneColumns = e.props.bodyColumns
+  const els = $.ui.resolve(e)
+  const { Box, Text } = els
+  const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
+  const tabs = await tabList($)
+  const picked = await read($, view)
+  const active = tabs.find(t => t.id === picked) ?? tabs[0]!
+  const body =
+    active.id === PANE
+      ? await drawAgents($, e)
+      : ((await drawDoc($, e, active.id)) ?? <Text dimColor>Loading {active.title}…</Text>)
+  if (tabs.length < 2) return body
+
+  return (
+    <Box flexDirection="column">
+      {Svg ? tabStrip($, els, Svg, tabs, active.id) : tabRowText($, els, tabs, active.id)}
+      {body}
+    </Box>
+  )
 }
