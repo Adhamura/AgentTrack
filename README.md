@@ -65,7 +65,7 @@ Settings are read when a session starts, so reopen sessions that were already ru
 
 - The board opens by itself the first time an agent writes a todo list or a subagent starts. In the terminal it opens on its own only in windows at least 144 columns wide.
 - A **▦ Progress** button sits just above the message box with each tab's live percent; press it to show or hide the board. `/agent-track` does the same at any size. (The desktop app may not list it in its suggestions; type the whole command.)
-- **↻ Check updates**, next to it, refreshes the marketplace Agent Track was installed from and updates the plugin when a newer version is there; `/agent-track update` does the same. Run `/reload-plugins` or start a new session to load the new version. It runs the `claude` command line, so `claude` must be on your `PATH`.
+- **↻ Check updates**, next to it, refreshes the marketplace Agent Track was installed from and updates the plugin when that marketplace has a newer version; `/agent-track update` does the same. Run `/reload-plugins` or start a new session to load the new version. It runs the `claude` command line, so `claude` must be on your `PATH`.
 - Agents that have no built-in todo tool (for example subagents in the desktop app) get one from Agent Track: `mcp__agent-track__todo`. Ask them to use it, or put that in your `CLAUDE.md`, and their tasks show up on the board.
 
 ## Project tabs
