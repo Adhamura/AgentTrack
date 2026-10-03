@@ -45,7 +45,7 @@ The board opens by itself the first time an agent writes a todo list or a subage
 
 <br>
 
-**From a local copy.** Clone the repository (or **Code → Download ZIP** and unzip it) and point the marketplace at that folder:
+**From a release.** Download `agent-track-<version>.zip` from [Releases](https://github.com/Adhamura/AgentTrack/releases/latest), unzip it (or clone the repository), and point the marketplace at the `agent-track` folder:
 
 ```
 /plugin marketplace add C:\path\to\agent-track
@@ -331,7 +331,7 @@ claude plugin test .
 node scripts/check-version.mjs origin/main
 ```
 
-`tsc` needs the engine's types in `.claude/types/claude-code.d.ts` (git-ignored): write them with `/plugin-types .claude/types` in a Claude Code session. Every change to what the plugin ships (`hooks/`, `types/`, `.claude-plugin/`) raises the version in both `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`; see [CLAUDE.md](CLAUDE.md). `pack.bat` (Windows) validates, tests and packs a release zip into `dist\`.
+`tsc` needs the engine's types in `.claude/types/claude-code.d.ts` (git-ignored): write them with `/plugin-types .claude/types` in a Claude Code session. Every change to what the plugin ships (`hooks/`, `types/`, `.claude-plugin/`) raises the version in both `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`; see [CLAUDE.md](CLAUDE.md). `node scripts/pack.mjs` (any platform) or `pack.bat` (Windows, which also validates and tests) packs a release zip into `dist/`. Releases publish themselves: when a new version reaches `main`, the Release workflow tags it `v<version>` and attaches the zip, with notes listing the pull requests since the last release.
 
 ## License
 

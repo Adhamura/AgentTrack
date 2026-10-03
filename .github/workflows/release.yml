@@ -1,0 +1,50 @@
+name: Release
+
+# Publishes a GitHub release for each new version that reaches main: the tag
+# v<version>, the packed zip, and notes listing the pull requests since the
+# last release. A push that keeps the version (docs, CI) publishes nothing.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Version matches
+        run: node scripts/check-version.mjs
+      - name: Read the version
+        id: version
+        run: |
+          v="$(node -p "require('./.claude-plugin/plugin.json').version")"
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+            echo "Release v$v already exists: nothing to publish."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Pack
+        if: steps.version.outputs.exists != 'true'
+        run: node scripts/pack.mjs
+      - name: Publish the release
+        if: steps.version.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: >-
+          gh release create "v$VERSION" "dist/agent-track-$VERSION.zip"
+          --target "$GITHUB_SHA"
+          --title "Agent Track $VERSION"
+          --notes-file dist/notes.md
+          --generate-notes
