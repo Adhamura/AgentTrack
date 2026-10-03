@@ -45,6 +45,7 @@ import {
   versionOf,
 } from './update'
 import type { UpdateOutcome } from './update'
+import { matches, runs, terms } from './search'
 import type { Motion, TabSpec } from './look'
 import { INK, PILL_H, PILL_TOP, SECTION_DOT, SUMMARY_H, TABS_H, W, tabsLayout, tabsSvg, agentRowSvg, emptyRowSvg, headerSvg, sectionHeadSvg, summaryPills, summarySvg, taskRowSvg } from './look'
 
@@ -68,6 +69,7 @@ const toggled = atom({ plugin: 'agent-track', key: 'toggled' } as const, {} as R
 const view = atom({ plugin: 'agent-track', key: 'view' } as const, PANE as string)
 const filters = atom({ plugin: 'agent-track', key: 'filter' } as const, {} as Record<string, Filter>)
 const updating = atom({ plugin: 'agent-track', key: 'updating' } as const, false)
+const searches = atom({ plugin: 'agent-track', key: 'search' } as const, {} as Record<string, string>)
 
 /** How long after a toggle its drawing still plays the turn. */
 const MOTION_MS = 700
@@ -179,14 +181,13 @@ const summaryCard = ($: $, els: Els, Art: SvgEl, pane: string, sum: Summary, fil
   )
 }
 
-/** The board's tabs: Agents, then each project checklist, each with its percent. */
+/** The board's tabs: each project checklist, then Agents last, each with its percent. */
 const tabList = async ($: $): Promise<TabSpec[]> => {
   const sum = summarize(mergePeers(await read($, board), await read($, selfName), await read($, peers)))
   const live = await read($, liveWork)
   const all = await read($, docs)
 
   return [
-    { id: PANE, title: TITLE, percent: sum.total > 0 ? sum.percent : undefined },
     ...docCtx.tabs.map(tab => {
       const id = tabPaneId(tab)
       const raw = all[id]
@@ -194,6 +195,7 @@ const tabList = async ($: $): Promise<TabSpec[]> => {
 
       return { id, title: tab.title, percent: c?.percent }
     }),
+    { id: PANE, title: TITLE, percent: sum.total > 0 ? sum.percent : undefined },
   ]
 }
 
@@ -266,6 +268,77 @@ const summaryPillsText = ($: $, els: Els, pane: string, sum: Summary, filter: Fi
     </Box>
   )
 }
+/**
+ * What each tab's search field last reported, so the field is drawn with no
+ * `value` while it holds what the person typed (a redraw that lags a keystroke
+ * would otherwise put back an older text) and with one when the board changed
+ * the query itself: a clear, or a field drawn anew.
+ */
+const typed: Record<string, string> = {}
+
+/** A tab's search query. */
+const searchOf = async ($: $, pane: string) => (await read($, searches))[pane] ?? ''
+
+/** The search field under a tab's summary, the width of the board, and a ✕ that clears it. */
+const searchBox = ($: $, els: Els, pane: string, query: string) => {
+  const { Box, Button } = els
+  const Input = 'Input' in els ? els.Input : undefined
+  if (!Input) return null
+  const set = (value: string) => {
+    typed[pane] = value
+    void update($, searches, all => ({ ...all, [pane]: value }))
+  }
+
+  return (
+    <Box key={`search-row-${pane}`} flexDirection="row" alignItems="center" gap={1} width="100%" marginBottom={1}>
+      <Box flexGrow={1}>
+        <Input
+          key={`search-${pane}`}
+          placeholder="Search tasks, agents, steps, details…"
+          value={typed[pane] === query ? undefined : query}
+          submitLabel="search"
+          onInput={set}
+          onSubmit={set}
+        />
+      </Box>
+      {query !== '' && (
+        <Button
+          key={`search-clear-${pane}`}
+          plain
+          label="✕"
+          onPress={() => {
+            delete typed[pane]
+            void update($, searches, all => ({ ...all, [pane]: '' }))
+          }}
+        />
+      )}
+    </Box>
+  )
+}
+
+/** A line of text with the characters the search found drawn bold in the highlight color. */
+const markedText = (els: Els, text: string, words: readonly string[], props: Record<string, unknown> = {}) => {
+  const { Text } = els
+
+  return (
+    <Text {...props}>
+      {runs(text, words).map((r, i) =>
+        r.isHit ? (
+          <Text key={`hit-${i}`} bold color={INK.hit}>
+            {r.text}
+          </Text>
+        ) : (
+          r.text
+        ),
+      )}
+    </Text>
+  )
+}
+
+/** What the board says when the status filter and the search leave nothing. */
+const nothingText = (filter: Filter, query: string) =>
+  query.trim() ? `Nothing matches “${query.trim()}”${filter === 'all' ? '' : ` among ${FILTER_ALT[filter]}`}.` : `Nothing ${FILTER_ALT[filter]}.`
+
 type Loose = { tool: string; agentId?: string; [k: string]: unknown }
 
 const isUp = async ($: $) => (await $.ui.panes()).some(p => p.id === PANE)
@@ -485,7 +558,7 @@ const toggleBoard = async ($: $, reload: boolean) => {
   await update($, dismissed, () => false)
   await $.ui.open({ id: PANE, title: PANE_TITLE })
 
-  return `Progress board shown: ${[TITLE, ...docCtx.tabs.map(t => t.title)].join(', ')}.`
+  return `Progress board shown: ${[...docCtx.tabs.map(t => t.title), TITLE].join(', ')}.`
 }
 
 /** Closes the separate pane each project tab had before 1.2.0, when one is still open. */
@@ -509,13 +582,25 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
   const pick = await read($, selected)
   const sum = summarize(b)
   const filter = (await read($, filters))[PANE] ?? 'all'
-  const isFiltered = filter !== 'all'
-  /** Under a filter sections and rows start open, so the matching tasks show; their own keys flip that. */
+  const query = await searchOf($, PANE)
+  const words = terms(query)
+  const isFiltered = filter !== 'all' || words.length > 0
+  /** A row's own texts: a task under it is searched with them, so words may span the row and the task. */
+  const rowTexts = (cat: Category) => [cat.title, cat.agentType, cat.note]
+  /** The tasks a row shows: the status filter's, and of those the ones the search finds. */
+  const shownTasks = (cat: Category) =>
+    tasksFor(cat, filter).filter(t => matches([...rowTexts(cat), t.title, t.activeForm, t.description], words))
+  /** A row shows when the search finds it (its step line included) or one of its tasks. */
+  const keeps = (cat: Category) =>
+    keepsRow(cat, filter) &&
+    (words.length === 0 || matches([...rowTexts(cat), currentStep(cat)], words) || shownTasks(cat).length > 0)
+  const nothing = nothingText(filter, query)
+  /** Under a filter or a search sections and rows start open, so the matching tasks show; their own keys flip that. */
   const sectionKey = (id: string) => (isFiltered ? `sf:${id}` : `s:${id}`)
   const foldKey = (id: string) => (isFiltered ? `of:${id}` : `o:${id}`)
   const isRowOpen = (id: string) => shut.has(foldKey(id)) !== isFiltered
   const shownSections = grouped(b)
-    .map(section => ({ ...section, categories: section.categories.filter(cat => keepsRow(cat, filter)) }))
+    .map(section => ({ ...section, categories: section.categories.filter(keeps) }))
     .filter(section => !isFiltered || section.categories.length > 0)
 
   const flips = await read($, toggled)
@@ -626,10 +711,9 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
       <Box flexDirection="column">
         <Art source={headerSvg(userName, subtitle, completions, now)} alt={`Welcome back${userName ? `, ${userName}` : ''}. ${subtitle}`} />
         {summaryCard($, els, Art, PANE, sum, filter)}
+        {searchBox($, els, PANE, query)}
         {detail}
-        {isFiltered && sections.length === 0 && (
-          <Art source={emptyRowSvg(`Nothing ${FILTER_ALT[filter]}.`)} alt={`Nothing ${FILTER_ALT[filter]}.`} />
-        )}
+        {isFiltered && sections.length === 0 && <Art source={emptyRowSvg(nothing)} alt={nothing} />}
         {sections.map(section => {
           const key = sectionKey(section.id)
           const isOpen = !shut.has(key)
@@ -640,7 +724,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
             <Box key={`sec-${section.id}`} flexDirection="column" marginBottom={1}>
               {strip(
                 `head-row-${section.id}`,
-                sectionHeadSvg(section.id, section.title, count, isOpen, sectionMotion, sectionProgress(section.categories)),
+                sectionHeadSvg(section.id, section.title, count, isOpen, sectionMotion, sectionProgress(section.categories), words),
                 `${section.title}, ${count}, ${isOpen ? 'expanded' : 'collapsed'}`,
                 <Button key={`head-${section.id}`} plain label={hit(48 / 925)} onPress={() => toggle(key, !isOpen)} />,
                 undefined,
@@ -653,7 +737,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
                 section.categories.flatMap((cat, i) => {
                   const fold = foldKey(cat.id)
                   const isExpanded = isRowOpen(cat.id)
-                  const tasksShown = tasksFor(cat, filter)
+                  const tasksShown = shownTasks(cat)
                   const isLast = i === count - 1
                   const foldMotion = motionOf(fold, isExpanded)
                   const row = strip(
@@ -663,6 +747,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
                       isOpen: isExpanded,
                       motion: foldMotion,
                       order: sectionMotion === 'open' ? i : undefined,
+                      mark: words,
                     }),
                     `${cat.title}: ${currentStep(cat)}, ${isExpanded ? 'expanded' : 'collapsed'}`,
                     <Button key={`fold-${cat.id}`} plain label={hit(74 / 925)} onPress={() => toggle(fold, !isExpanded)} />,
@@ -689,6 +774,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
                         isLast: isLast && j === tasksShown.length - 1,
                         isPicked: pick === `${cat.id}::${task.id}`,
                         order: reveal ? j : undefined,
+                        mark: words,
                       }),
                       `${task.title}: ${task.status}`,
                       undefined,
@@ -737,6 +823,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
         </Text>
       </Box>
       {summaryPillsText($, els, PANE, sum, filter)}
+      {searchBox($, els, PANE, query)}
     </Box>
   )
 
@@ -779,7 +866,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
           </Text>
           <Box flexGrow={1}>
             <Text wrap="truncate-end">
-              {cat.title}
+              {markedText(els, cat.title, words)}
               {live ? <Text color={C.green}> ●</Text> : ''}
             </Text>
           </Box>
@@ -798,7 +885,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
             {currentStep(cat)}
           </Text>
         </Box>
-        {isOpen && tasksFor(cat, filter).map(task => taskRow(cat, task))}
+        {isOpen && shownTasks(cat).map(task => taskRow(cat, task))}
       </Box>
     )
   }
@@ -812,7 +899,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
         <Box flexDirection="row" gap={1}>
           <Button key={`head-${section.id}`} plain label={isOpen ? '▾' : '▸'} onPress={() => toggle(key, !isOpen)} />
           <Text color={SECTION_DOT[section.id]}>●</Text>
-          <Text bold>{section.title}</Text>
+          {markedText(els, section.title, words, { bold: true })}
           <Text dimColor>{section.categories.length}</Text>
         </Box>
         {isOpen && section.categories.length === 0 && (
@@ -889,7 +976,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
       {b.categories.length === 0 ? (
         <Text dimColor>No agents have a todo list yet. They show up here as soon as one does.</Text>
       ) : isFiltered && sections.length === 0 ? (
-        <Text dimColor>Nothing {FILTER_ALT[filter]}.</Text>
+        <Text dimColor>{nothing}</Text>
       ) : (
         sections
       )}
@@ -924,8 +1011,12 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
     return isLive || c.done + c.inProgress > 0 ? 'working' : 'waiting'
   }
   const filter = (await read($, filters))[pane] ?? 'all'
-  const isFiltered = filter !== 'all'
-  const fits = (item: DocItem) => !isFiltered || item.status === filter
+  const query = await searchOf($, pane)
+  const words = terms(query)
+  const isFiltered = filter !== 'all' || words.length > 0
+  /** An item the status filter and the search keep; the search reads the titles above it too, so words may span them. */
+  const fits = (above: readonly string[]) => (item: DocItem) =>
+    (filter === 'all' || item.status === filter) && matches([...above, item.title, item.detail], words)
   /**
    * Sections start open unless finished; groups start closed. Under a filter
    * both start open, on keys of their own. A key in `collapsed` flips the default.
@@ -938,11 +1029,13 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
   const shown = doc.sections
     .map(section => ({
       section,
-      items: section.items.filter(fits),
-      groups: section.groups.map(g => ({ group: g, items: g.items.filter(fits) })).filter(g => !isFiltered || g.items.length > 0),
+      items: section.items.filter(fits([section.title])),
+      groups: section.groups
+        .map(g => ({ group: g, items: g.items.filter(fits([section.title, g.title])) }))
+        .filter(g => !isFiltered || g.items.length > 0),
     }))
     .filter(v => !isFiltered || v.items.length > 0 || v.groups.length > 0)
-  const nothing = `Nothing ${FILTER_ALT[filter]}.`
+  const nothing = nothingText(filter, query)
   const toggle = async (key: string, open: boolean) => {
     const at = await $.clock.now()
     await update($, toggled, list => ({
@@ -1019,6 +1112,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
       <Box flexDirection="column">
         <Art source={headerSvg('', subtitle, steps, now, doc.title, DOC_SPAN)} alt={`${doc.title}. ${subtitle}`} />
         {summaryCard($, els, Art, pane, sum, filter)}
+        {searchBox($, els, pane, query)}
         {detail}
         {isFiltered && shown.length === 0 && <Art source={emptyRowSvg(nothing)} alt={nothing} />}
         {shown.map(({ section, items: ownItems, groups }) => {
@@ -1039,6 +1133,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                     order: sectionMotion === 'open' ? j : undefined,
                     when: '',
                     flat: true,
+                    mark: words,
                   }),
                   `${item.title}: ${item.status}`,
                   undefined,
@@ -1061,6 +1156,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                     motion: gMotion,
                     order: sectionMotion === 'open' ? ownItems.length + j : undefined,
                     when: `${gc.percent}%`,
+                    mark: words,
                   }),
                   `${group.title}: ${gc.done}/${gc.total}, ${gOpen ? 'expanded' : 'collapsed'}`,
                   <Button key={`group-${pane}:${group.id}`} plain label={hit(74 / 925)} onPress={() => toggle(gkey, !gOpen)} />,
@@ -1075,6 +1171,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                         isPicked: pick === `${pane}::${item.id}`,
                         order: gMotion === 'open' ? k : undefined,
                         when: '',
+                        mark: words,
                       }),
                       `${item.title}: ${item.status}`,
                       undefined,
@@ -1090,7 +1187,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
           return (
             <Box key={`doc-${pane}-${section.id}`} flexDirection="column" marginBottom={1}>
               {strip(
-                sectionHeadSvg(state, section.title, `${c.done}/${c.total}`, isOpen, sectionMotion, c),
+                sectionHeadSvg(state, section.title, `${c.done}/${c.total}`, isOpen, sectionMotion, c, words),
                 `${section.title}, ${c.done} of ${c.total} done, ${isOpen ? 'expanded' : 'collapsed'}`,
                 <Button key={`head-${pane}:${section.id}`} plain label={hit(48 / 925)} onPress={() => toggle(key, !isOpen)} />,
                 undefined,
@@ -1139,6 +1236,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
         </Text>
       </Box>
       <Box marginBottom={1}>{summaryPillsText($, els, pane, sum, filter)}</Box>
+      {searchBox($, els, pane, query)}
       {isFiltered && shown.length === 0 && <Text dimColor>{nothing}</Text>}
       {shown.map(({ section, items: ownItems, groups }) => {
         const items = itemsOf(section)
@@ -1157,11 +1255,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                 onPress={() => toggle(key, !isOpen)}
               />
               <Text color={SECTION_DOT[state]}>●</Text>
-              <Box flexGrow={1}>
-                <Text bold wrap="truncate-end">
-                  {section.title}
-                </Text>
-              </Box>
+              <Box flexGrow={1}>{markedText(els, section.title, words, { bold: true, wrap: 'truncate-end' })}</Box>
               <Text dimColor>
                 {c.done}/{c.total}
               </Text>
@@ -1182,9 +1276,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                         label={gOpen ? '▾' : '▸'}
                         onPress={() => toggle(gkey, !gOpen)}
                       />
-                      <Box flexGrow={1}>
-                        <Text wrap="truncate-end">{group.title}</Text>
-                      </Box>
+                      <Box flexGrow={1}>{markedText(els, group.title, words, { wrap: 'truncate-end' })}</Box>
                       <Text color={gc.done === gc.total ? C.green : C.blue}>
                         {ringGlyph(gc.total ? gc.done / gc.total : 0)}
                       </Text>
@@ -1384,7 +1476,7 @@ export const register: Register = (on, options) => {
 
       return [`${tab.title} ${c.percent}%`]
     })
-    const parts = [...(sum.total > 0 ? [`${TITLE} ${sum.percent}%`] : []), ...tabs]
+    const parts = [...tabs, ...(sum.total > 0 ? [`${TITLE} ${sum.percent}%`] : [])]
     const isUpdating = await read($, updating)
 
     return (
@@ -1407,6 +1499,8 @@ export const register: Register = (on, options) => {
 
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin.kind === 'person') await update($, dismissed, () => true)
+    // The board's search fields are drawn anew when it opens again: give them their queries back.
+    if (e.id === PANE) for (const pane of Object.keys(typed)) delete typed[pane]
 
     return next(e)
   })

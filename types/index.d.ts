@@ -101,6 +101,8 @@ declare module 'claude-code' {
       view: string
       /** True while Check updates refreshes the marketplace and updates the plugin. */
       updating: boolean
+      /** Each tab's search query, by pane id: words that filter and highlight the board. */
+      search: Record<string, string>
     }
   }
 }

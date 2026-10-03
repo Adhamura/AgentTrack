@@ -3,6 +3,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import { applyLive, itemsOf, parseDoc, tabPaneId } from '../hooks/docs'
 import { partial, sameWork } from '../hooks/match'
 import { claudeArgv, compareVersions, findInstalled, installedVersion, lastLine, marketplaceDir, offered, outcomeText, pluginsDirOf, versionOf } from '../hooks/update'
+import { matches, runs, terms } from '../hooks/search'
 import { applyTodoWrite, emptyBoard, grouped, mergePeers, relTime, rowCheck, summarize } from '../hooks/board'
 
 const PANE = { component: 'Pane', requestId: 'agent-track' } as const
@@ -16,6 +17,19 @@ const paneProps = {
 } as const
 
 describe('board model', () => {
+  test('a search matches every word in any case and marks each occurrence', async () => {
+    expect(terms('  Engine  GL ')).toEqual(['engine', 'gl'])
+    expect(matches(['Q.11 Engine GL helper', 'general-purpose'], terms('gl engine'))).toBe(true)
+    expect(matches(['Q.11 Engine GL helper'], terms('engine webgpu'))).toBe(false)
+    expect(matches(['anything'], [])).toBe(true)
+    expect(runs('Glow GL', ['gl'])).toEqual([
+      { text: 'Gl', isHit: true },
+      { text: 'ow ', isHit: false },
+      { text: 'GL', isHit: true },
+    ])
+    expect(runs('abc', ['ab', 'bc'])).toEqual([{ text: 'abc', isHit: true }])
+  })
+
   test('todo writes keep times and count progress', async () => {
     let b = applyTodoWrite(
       emptyBoard(),
@@ -300,6 +314,21 @@ test('the summary pills filter the board by status, with All as the way back', a
     await ui.press({ key: 'filter-agent-track:all' })
     expect(await ui.find({ key: 'task-main::t1' })).toBeUndefined()
     expect(await ui.find({ key: 'head-working' })).toBeDefined()
+
+    // The search opens the rows and keeps only the tasks it finds, marking what it found.
+    await ui.input({ key: 'search-agent-track', text: 'dra', kind: 'change' })
+    expect(await ui.find({ key: 'task-main::t2' })).toBeDefined()
+    expect(await ui.find({ key: 'task-main::t1' })).toBeUndefined()
+    expect(await ui.find({ key: 'task-main::t3' })).toBeUndefined()
+    if (surface === 'desktop') {
+      const art = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source)).join('')
+      expect(art).toContain('fill="#d9480f">Dra</tspan>w')
+    }
+    await ui.input({ key: 'search-agent-track', text: 'nothing like it', kind: 'change' })
+    expect(await ui.find({ key: 'task-main::t2' })).toBeUndefined()
+    await ui.press({ key: 'search-clear-agent-track' })
+    expect(await ui.find({ key: 'search-clear-agent-track' })).toBeUndefined()
+    expect(await ui.find({ key: 'task-main::t2' })).toBeUndefined()
     if (surface === 'desktop') {
       // Each invisible click target is laid out in a room far wider than its cell, so a desktop never cuts its label with an ellipsis.
       const hits = (await ui.findAll({ type: 'Button' })).filter(el => /^\u2007+$/.test(String(el.props.label)))
@@ -333,6 +362,9 @@ test('project checklists are tabs inside the one board pane, each filtering on i
   await $.session.start({ cwd: '/p', surface: 'terminal', isInteractive: true } as never)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'agent-track', surface, ...PANE, props: paneProps as never })
+    // Agents is the last tab.
+    const tabKeys = (await ui.findAll({ type: 'Button' })).map(b => String(b.key)).filter(k => k.startsWith('tab-'))
+    expect(tabKeys).toEqual(['tab-agent-track-roadmap', 'tab-agent-track'])
     await ui.press({ key: 'tab-agent-track-roadmap' })
     expect(await ui.find({ key: 'filter-agent-track-roadmap:all' })).toBeDefined()
     expect(await ui.find({ key: 'filter-agent-track:all' })).toBeUndefined()
@@ -342,6 +374,14 @@ test('project checklists are tabs inside the one board pane, each filtering on i
     expect((await ids()).length).toBe(1)
     expect(await ui.find({ key: 'head-agent-track-roadmap:done-part' })).toBeUndefined()
     await ui.press({ key: 'filter-agent-track-roadmap:pending' })
+    expect(await ids()).toEqual([])
+    // The search opens what it finds; words may span a section, a group and an item.
+    await ui.input({ key: 'search-agent-track-roadmap', text: 'keys second', kind: 'change' })
+    expect(await ids()).toEqual(['item-agent-track-roadmap::i1'])
+    await ui.input({ key: 'search-agent-track-roadmap', text: 'zero', kind: 'change' })
+    expect((await ids()).length).toBe(1)
+    expect(await ui.find({ key: 'head-agent-track-roadmap:hunt' })).toBeUndefined()
+    await ui.press({ key: 'search-clear-agent-track-roadmap' })
     expect(await ids()).toEqual([])
     await ui.press({ key: 'tab-agent-track' })
     expect(await ui.find({ key: 'filter-agent-track:all' })).toBeDefined()
