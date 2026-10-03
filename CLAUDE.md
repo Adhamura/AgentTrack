@@ -23,3 +23,13 @@ node scripts/check-version.mjs origin/main
 ```
 
 `tsc` needs `.claude/types/claude-code.d.ts` (git-ignored): Claude Code writes it, or copy it from the plugin-authoring skill's `types/claude-code.d.ts`.
+
+## Finishing a change: PR and auto-merge
+
+The marketplace serves `main`, so a change is finished only when it is on `main`. When a change is done and the checks above pass, without asking first:
+
+1. push the branch and open a pull request into `main`;
+2. wait for the Check workflow on it to pass (fix and push again if it fails);
+3. merge the pull request yourself (merge commit), then tell the user it is live.
+
+Ask before merging only when the change is risky or the user said not to merge.
