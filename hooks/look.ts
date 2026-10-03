@@ -390,11 +390,21 @@ const pills = (cy: number, c: Counts, when: string, section: SectionId) =>
 export const agentRowSvg = (
   cat: Category,
   now: number,
-  opts: { isLast: boolean; isOpen: boolean; motion?: Motion; order?: number; when?: string; mark?: readonly string[] },
+  opts: {
+    isLast: boolean
+    isOpen: boolean
+    motion?: Motion
+    order?: number
+    when?: string
+    mark?: readonly string[]
+    /** Its items' part columns with how many are done: drawn under the columns of its rows. */
+    columns?: readonly ColumnCount[]
+  },
 ) => {
   const h = 64
   const c = countTasks(cat.tasks)
   const sub = [cat.kind === 'agent' && cat.agentType ? cat.agentType : '', currentStep(cat)].filter(Boolean).join(' · ')
+  const cols = opts.columns && opts.columns.length > 0 ? facetLayout(opts.columns.map(col => col.key), ROW_TEXT_X) : []
 
   return svg(
     h,
@@ -403,7 +413,8 @@ export const agentRowSvg = (
         chevron(37, 31, opts.isOpen, opts.motion) +
           checkbox(71, 21, rowCheck(cat)) +
           `<text x="120" y="29" font-size="18.5" fill="${INK.text}">${marked(cat.title, 570, 9.6, opts.mark)}</text>` +
-          `<text x="120" y="52" font-size="16.5" fill="${INK.sub}">${marked(sub, 560, 8.6, opts.mark)}</text>` +
+          `<text x="120" y="52" font-size="16.5" fill="${INK.sub}">${marked(sub, cols[0] ? cols[0].x - 132 : 560, 8.6, opts.mark)}</text>` +
+          cols.map((at, i) => countCell(at, opts.columns![i]!)).join('') +
           pills(32, c, opts.when ?? relTime(cat.updatedAt, now), sectionOf(cat)),
         opts.order,
       ),
@@ -411,6 +422,27 @@ export const agentRowSvg = (
 }
 
 /** One todo item under an open agent, with the guide line on its left. */
+/** How many of a list's lines have a part done, of those that have it. */
+export type ColumnCount = { key: string; done: number; total: number }
+
+/** Where a group's item rows start their names: what lines its column counts up with them. */
+const ROW_TEXT_X = 166
+
+/** A column's count on its group's row, under the column: a check once all are done, else a ring, then done/total. */
+const countCell = (at: { x: number }, col: ColumnCount) => {
+  const cx = at.x + 11
+  const isAll = col.total > 0 && col.done === col.total
+  const icon = isAll
+    ? `<circle cx="${cx}" cy="47" r="7.5" fill="${INK.green}"/>` +
+      `<path d="M${cx - 3.5},47.5 L${cx - 1},50 L${cx + 3.5},44.5" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
+    : `<circle cx="${cx}" cy="47" r="7" fill="#fff" stroke="${INK.box}" stroke-width="1.5"/>`
+
+  return (
+    icon +
+    `<text x="${at.x + 24}" y="52" font-size="15" fill="${isAll ? INK.greenText : INK.grayText}">${col.done}/${col.total}</text>`
+  )
+}
+
 /** Where a row's part columns end: left of the widest status chip. */
 const FACETS_END = 651
 /** A part column's width: its icon and its word. */
@@ -477,7 +509,7 @@ export const taskRowSvg = (
   const box = task.status === 'completed' ? 'done' : task.status === 'in_progress' ? 'active' : 'empty'
   const isDone = task.status === 'completed'
   /** A flat row sits right under a section header: no guide line, aligned with the rows' checkboxes. */
-  const [boxX, textX] = opts.flat ? [71, 120] : [121, 166]
+  const [boxX, textX] = opts.flat ? [71, 120] : [121, ROW_TEXT_X]
   const time = opts.when ?? (relTime(when, now) || '—')
   const cols = opts.columns && opts.columns.length > 0 ? facetLayout(opts.columns, textX) : []
   const titleEnd = cols[0] ? cols[0].x - 12 : 686
