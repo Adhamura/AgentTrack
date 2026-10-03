@@ -311,17 +311,23 @@ export type Scope = 'session' | 'project' | 'all'
 export const SCOPES: readonly Scope[] = ['session', 'project', 'all']
 export const isScope = (v: unknown): v is Scope => typeof v === 'string' && (SCOPES as readonly string[]).includes(v)
 
-/** A folder path to compare: forward slashes, no trailing slash, any case on Windows (a drive letter or `\\`). */
-const folderKey = (path: string) => {
-  const p = path.replace(/\\/g, '/').replace(/\/+$/, '')
+/**
+ * A folder as a project key: forward slashes, no `\\?\` prefix or trailing
+ * slash, any case on Windows, and a worktree Claude Code made for a session
+ * (`<project>/.claude/worktrees/<name>`) counted as its project.
+ */
+export const projectKey = (path: string): string => {
+  let p = path.replace(/^\\\\\?\\/, '').replace(/\\/g, '/').replace(/\/+$/, '')
+  if (/^[a-z]:\//i.test(p) || p.startsWith('//')) p = p.toLowerCase()
+  const tree = p.search(/\/\.claude\/worktrees\//i)
 
-  return /^[a-z]:\//i.test(p) || path.startsWith('\\\\') ? p.toLowerCase() : p
+  return tree >= 0 ? p.slice(0, tree) : p
 }
 
-/** Whether a session working in `cwd` works on the project in `project`: that folder or one inside it. */
+/** Whether a session working in `cwd` works on the project in `project`: that folder, one inside it, or a worktree of it. */
 export const inProject = (cwd: string, project: string): boolean => {
   if (!cwd || !project) return false
-  const [c, p] = [folderKey(cwd), folderKey(project)]
+  const [c, p] = [projectKey(cwd), projectKey(project)]
 
   return c === p || c.startsWith(`${p}/`)
 }
@@ -345,6 +351,35 @@ export const peerWork = (peers: readonly Peer[]): string[] =>
           ...c.tasks.filter(t => t.status === 'in_progress').flatMap(t => [t.title, t.activeForm ?? '']),
         ]),
     )
+
+/** A subagent of this session as the engine lists it (`$.agent.list()`). */
+export type ListedAgent = { id: string; description: string; type: string; status: string; parentId?: string; name?: string }
+
+/**
+ * Brings the board's agent rows in line with the engine's list: a running
+ * agent gets a live row (even one that never wrote a todo, or started before
+ * this mod loaded), and a listed agent that stopped running is finished.
+ * Rows the list does not name are left as they are.
+ */
+export const syncAgents = (board: Board, agents: readonly ListedAgent[], now: number): Board => {
+  let next = board
+  for (const a of agents) {
+    const cat = next.categories.find(c => c.id === a.id)
+    const isRunning = a.status === 'running'
+    if (!cat && !isRunning) continue
+    if (cat && cat.isLive === isRunning && cat.isFinished === !isRunning) continue
+    const title = a.description || a.name || `${a.type} agent`
+    next = withCategory(
+      next,
+      a.id,
+      now,
+      c => ({ ...c, title: c.title || title, isLive: isRunning, isFinished: !isRunning }),
+      { title, kind: 'agent', agentType: a.type, parentId: a.parentId },
+    )
+  }
+
+  return next
+}
 
 /** What the agent is doing now: the active todo's present-tense form. */
 export const currentStep = (cat: Category): string => {
