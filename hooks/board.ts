@@ -306,6 +306,46 @@ export const mergePeers = (local: Board, selfName: string, peers: readonly Peer[
   return { ...local, categories: [...own, ...remote] }
 }
 
+/** Which sessions the board shows: this one, every one in this project's folder, or every one on this machine. */
+export type Scope = 'session' | 'project' | 'all'
+export const SCOPES: readonly Scope[] = ['session', 'project', 'all']
+export const isScope = (v: unknown): v is Scope => typeof v === 'string' && (SCOPES as readonly string[]).includes(v)
+
+/** A folder path to compare: forward slashes, no trailing slash, any case on Windows (a drive letter or `\\`). */
+const folderKey = (path: string) => {
+  const p = path.replace(/\\/g, '/').replace(/\/+$/, '')
+
+  return /^[a-z]:\//i.test(p) || path.startsWith('\\\\') ? p.toLowerCase() : p
+}
+
+/** Whether a session working in `cwd` works on the project in `project`: that folder or one inside it. */
+export const inProject = (cwd: string, project: string): boolean => {
+  if (!cwd || !project) return false
+  const [c, p] = [folderKey(cwd), folderKey(project)]
+
+  return c === p || c.startsWith(`${p}/`)
+}
+
+/** The other sessions the board shows at a scope; `project` is this session's folder. */
+export const scopedPeers = (scope: Scope, peers: readonly Peer[], project: string): Peer[] =>
+  scope === 'session' ? [] : scope === 'project' ? peers.filter(p => inProject(p.cwd, project)) : [...peers]
+
+/**
+ * What other running sessions are working on now, from their published
+ * boards: their live agents' titles and their todo items in progress.
+ */
+export const peerWork = (peers: readonly Peer[]): string[] =>
+  peers
+    .filter(p => p.isRunning && p.board)
+    .flatMap(p =>
+      p.board!.categories
+        .filter(c => !c.isFinished)
+        .flatMap(c => [
+          ...(c.kind === 'agent' && c.isLive ? [c.title] : []),
+          ...c.tasks.filter(t => t.status === 'in_progress').flatMap(t => [t.title, t.activeForm ?? '']),
+        ]),
+    )
+
 /** What the agent is doing now: the active todo's present-tense form. */
 export const currentStep = (cat: Category): string => {
   const active = cat.tasks.find(t => t.status === 'in_progress')

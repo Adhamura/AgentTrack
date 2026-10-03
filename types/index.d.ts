@@ -103,6 +103,8 @@ declare module 'claude-code' {
       updating: boolean
       /** Each tab's search query, by pane id: words that filter and highlight the board. */
       search: Record<string, string>
+      /** Which sessions the board shows: this one, this project's, or every one on this machine. */
+      scope: 'session' | 'project' | 'all'
     }
   }
 }

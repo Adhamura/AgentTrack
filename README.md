@@ -10,7 +10,7 @@ A live progress board for Claude Code. Every session, every subagent and every t
 - **Sections**: Working, Not started and Done, each with a colored dot, a count, and a chevron that opens and closes it with a short animation.
 - **One row per session or subagent**: its title, what it is doing right now, a progress ring with done/total, and how long ago it last changed. New subagents appear the moment they start.
 - **Tasks** under each row, from the agent's todo list, with a status chip. The ⋯ button opens a details box with when each task was created, started and finished, and how long it took.
-- **Every session on your machine**: each session running Agent Track publishes its board, so any board shows all of them. Sessions without Agent Track still appear, with their busy or idle state.
+- **This session, this project, or every session**: the switch at the top right of the board picks which sessions it shows. **Project** (the default) shows every session working in this project's folder or a folder inside it, **Session** this one alone, **All** every session on your machine. Each session running Agent Track publishes its board; sessions without it still appear, with their busy or idle state. The choice is remembered for the next session.
 - **Project tabs**: your project's own checklists (a roadmap, an art list, anything in Markdown with `- [ ]` boxes) each get a tab before **Agents** (which is always last), in the same design. The tabs sit at the top of the one board pane; click one to switch. See [Project tabs](#project-tabs).
 
 The desktop app gets the full drawing above. The terminal gets the same layout in text and color.
@@ -89,7 +89,7 @@ How a file is read:
 - An item's name is its **bold** part, or its first 70 characters. ⋯ shows the whole line.
 - `strip` removes text matching these regular expressions from every heading. `keepEmptySections` keeps `##` sections that have no boxes.
 - Sections start open unless they are finished; groups start closed. Each section header has its own progress bar.
-- **Live matching**: an open item shows *In progress* while something running in the session names the same work: a running agent's label, or a todo item in progress. It matches by task code (`HU.5`, `W.14`) or when one title covers at least 80% of the other (character-pair similarity, no AI). Done items never change, and nothing is written back to the file.
+- **Live matching**: an open item shows *In progress* while something running in the session, or in another session in this project (unless the switch is on **Session**), names the same work: a running agent's label, or a todo item in progress. It matches by task code (`HU.5`, `W.14`) or when one title covers at least 80% of the other (character-pair similarity, no AI). Done items never change, and nothing is written back to the file.
 
 A tab refreshes by itself when its file changes, whether Claude or you edited it. `/agent-track reload` re-reads the list of tabs.
 
