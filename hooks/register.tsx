@@ -29,6 +29,8 @@ import {
 import type { Filter, SectionId, Summary, TodoItem } from './board'
 import { CONFIG_FILE, applyLive, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
 import type { DocTab } from './docs'
+import { REFRESH_MS, SCOPES, UPDATE_MS, findInstalled, outcomeText, readUpdate, refreshFailure, runFailure } from './update'
+import type { UpdateOutcome } from './update'
 import type { Motion, TabSpec } from './look'
 import { INK, PILL_H, PILL_TOP, SECTION_DOT, SUMMARY_H, TABS_H, W, tabsLayout, tabsSvg, agentRowSvg, emptyRowSvg, headerSvg, sectionHeadSvg, summaryPills, summarySvg, taskRowSvg } from './look'
 
@@ -51,11 +53,17 @@ const docHistory = atom({ plugin: 'agent-track', key: 'docHistory' } as const, {
 const toggled = atom({ plugin: 'agent-track', key: 'toggled' } as const, {} as Record<string, { at: number; open: boolean }>)
 const view = atom({ plugin: 'agent-track', key: 'view' } as const, PANE as string)
 const filters = atom({ plugin: 'agent-track', key: 'filter' } as const, {} as Record<string, Filter>)
+const updating = atom({ plugin: 'agent-track', key: 'updating' } as const, false)
 
 /** How long after a toggle its drawing still plays the turn. */
 const MOTION_MS = 700
-/** A Button with nothing visible: the click target laid over a drawn chevron. */
-const HIT = '  '
+/**
+ * The label of a Button with nothing visible, laid over a drawing: figure
+ * spaces (they neither wrap nor collapse), far wider than any cell it sits in
+ * and clipped to that cell (`overflow="hidden"`), so every point of the cell,
+ * not only its middle, takes the pointer and the press.
+ */
+const HIT = '\u2007'.repeat(120)
 /** The width, as a share of a drawn strip, that centers a click target on a chevron drawn at `cx` (of 925). */
 const hitWidth = (cx: number) => `${Math.round((2 * cx * 100) / 925)}%`
 /** A section's progress: the summed items of its rows. */
@@ -110,8 +118,8 @@ const hitRow = (
 
     return [
       <Box key={`gap-${p.key}`} width={`${gap}%`} />,
-      <Box key={`spot-${p.key}`} width={`${to - from}%`} alignItems="center" justifyContent="center">
-        <Button key={p.key} plain label={' '.repeat(Math.max(4, Math.round(p.w / 13)))} onPress={p.onPress} />
+      <Box key={`spot-${p.key}`} width={`${to - from}%`} overflow="hidden" alignItems="center" justifyContent="center">
+        <Button key={p.key} plain label={HIT} onPress={p.onPress} />
       </Box>,
     ]
   })
@@ -527,6 +535,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
             top={0}
             bottom={0}
             width={hitWidth(cx)}
+            overflow="hidden"
             alignItems="center"
             justifyContent="center"
           >
@@ -958,6 +967,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
             top={0}
             bottom={0}
             width={hitWidth(cx)}
+            overflow="hidden"
             alignItems="center"
             justifyContent="center"
           >
@@ -1164,6 +1174,45 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
   )
 }
 
+/**
+ * Refreshes the marketplace this plugin came from, then updates the plugin
+ * from it, through the `claude` command line the person has installed.
+ */
+const checkUpdates = async ($: $): Promise<UpdateOutcome> => {
+  try {
+    const listed = await $.process.run(['claude', 'plugin', 'list', '--json'], { timeoutMs: 30_000 })
+    if (listed.exitCode !== 0) return { kind: 'failed', reason: listed.stderr.trim() || 'claude plugin list failed' }
+    const me = findInstalled(listed.stdout, $.plugin.root)
+    if (!me) return { kind: 'local' }
+    const marketplace = me.id.slice(me.id.indexOf('@') + 1)
+    const refreshed = await $.process.run(['claude', 'plugin', 'marketplace', 'update', marketplace, '--json'], { timeoutMs: REFRESH_MS })
+    const failed = refreshFailure(refreshed.stdout, refreshed.stderr, refreshed.exitCode, marketplace)
+    if (failed) return { kind: 'failed', reason: failed }
+    const scope = me.scope && SCOPES.includes(me.scope) ? ['--scope', me.scope] : []
+    const updated = await $.process.run(['claude', 'plugin', 'update', me.id, '--json', ...scope], { timeoutMs: UPDATE_MS })
+
+    return readUpdate(updated.stdout, updated.exitCode)
+  } catch (err) {
+    return runFailure(err)
+  }
+}
+
+/** Refreshes the marketplace and updates the plugin from it, once at a time; the outcome as one line. */
+const runCheckUpdates = async ($: $): Promise<string> => {
+  if (await read($, updating)) return 'Already checking for updates.'
+  await update($, updating, () => true)
+  try {
+    return outcomeText(await checkUpdates($))
+  } finally {
+    await update($, updating, () => false)
+  }
+}
+
+/** The Check updates button: the outcome as a toast. */
+const pressCheckUpdates = async ($: $) => {
+  $.ui.toast(await runCheckUpdates($))
+}
+
 export const register: Register = (on, options) => {
   userName = typeof options.name === 'string' ? options.name.trim() : ''
 
@@ -1218,7 +1267,12 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'agent-track' }, async ($, e) => ({ text: await toggleBoard($, e.args.trim() === 'reload') }))
+  on('command.run', { command: 'agent-track' }, async ($, e) => {
+    const arg = e.args.trim()
+    if (arg === 'update') return { text: await runCheckUpdates($) }
+
+    return { text: await toggleBoard($, arg === 'reload') }
+  })
 
   /** The button above the message box: the board's live percents, and a press opens or closes it. */
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -1234,10 +1288,18 @@ export const register: Register = (on, options) => {
       return [`${tab.title} ${c.percent}%`]
     })
     const parts = [...(sum.total > 0 ? [`${TITLE} ${sum.percent}%`] : []), ...tabs]
+    const isUpdating = await read($, updating)
 
     return (
       <Box flexDirection="row" gap={1} alignItems="center">
         <Button key="board-toggle" plain label="▦ Progress" onPress={() => void toggleBoard($, false)} />
+        <Button
+          key="check-updates"
+          plain
+          dimColor={!isUpdating}
+          label={isUpdating ? '↻ Checking…' : '↻ Check updates'}
+          onPress={() => void pressCheckUpdates($)}
+        />
         <Text color={INK.sub} wrap="truncate-end">
           {parts.length > 0 ? parts.join(' · ') : 'No tasks yet'}
         </Text>
