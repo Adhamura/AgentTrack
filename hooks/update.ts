@@ -1,5 +1,13 @@
-/** One installed plugin as `claude plugin list --json` reports it. */
-export type Installed = { id: string; version?: string; scope?: string; installPath?: string }
+/**
+ * Check updates, without depending on the `claude` command line's newer
+ * options (`--json` is missing from older builds): what is installed and what
+ * the marketplace offers are read from the files Claude Code keeps under
+ * `~/.claude/plugins/`, and only `claude plugin marketplace update <name>` and
+ * `claude plugin update <id>`, which every build with plugins has, are run.
+ */
+
+/** The installed copy of this plugin, as `installed_plugins.json` and its own folder name it. */
+export type Installed = { id: string; name: string; marketplace: string; scope?: string; version?: string }
 
 /** What a press of Check updates came to, as one line for a toast. */
 export type UpdateOutcome =
@@ -8,67 +16,123 @@ export type UpdateOutcome =
   | { kind: 'local' }
   | { kind: 'failed'; reason: string }
 
-const NAME = 'agent-track'
 /** A marketplace refresh clones from GitHub: give it the CLI's own two minutes and some room. */
 export const REFRESH_MS = 150_000
 export const UPDATE_MS = 180_000
-/** The scopes `claude plugin update --scope` takes. */
-export const SCOPES = ['user', 'project', 'local', 'managed']
 
-const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+const slashes = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '')
+const norm = (p: string) => slashes(p).toLowerCase()
+const CACHE = '/plugins/cache/'
 
-/** Whether a plugin folder is one Claude Code installed from a marketplace (its plugin cache). */
-const isInstalledCopy = (root: string) => norm(root).includes('/plugins/cache/')
-
-/**
- * The entry this copy of the plugin was installed as: by its folder, or else
- * by name when this copy is an installed one; a copy loaded from a folder of
- * its own (`--plugin-dir`) has none, even when another copy is installed.
- */
-export const findInstalled = (listJson: string, root: string): Installed | undefined => {
-  let list: unknown
+const parse = (text: string): unknown => {
   try {
-    list = JSON.parse(listJson)
+    return JSON.parse(text)
   } catch {
     return undefined
   }
-  if (!Array.isArray(list)) return undefined
-  const all = list.filter((p): p is Installed => !!p && typeof p === 'object' && typeof (p as Installed).id === 'string')
-  const mine = all.filter(p => p.id.split('@')[0] === NAME && p.id.includes('@'))
+}
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
+const strOf = (v: unknown) => (typeof v === 'string' && v ? v : undefined)
 
-  const exact = mine.find(p => p.installPath && norm(p.installPath) === norm(root))
+/**
+ * The `~/.claude/plugins` folder an installed copy lives under, with forward
+ * slashes; nothing for a copy loaded from a folder of its own (`--plugin-dir`).
+ */
+export const pluginsDirOf = (root: string): string | undefined => {
+  const path = slashes(root)
+  const at = path.toLowerCase().lastIndexOf(CACHE)
 
-  return exact ?? (isInstalledCopy(root) ? mine[0] : undefined)
+  return at < 0 ? undefined : path.slice(0, at + '/plugins'.length)
 }
 
-/** The last line of the output that parses as a JSON object: where `--json` puts its result. */
-export const lastJson = (out: string): Record<string, unknown> | undefined => {
-  const lines = out.split(/\r?\n/).filter(l => l.trim().startsWith('{'))
-  for (let i = lines.length - 1; i >= 0; i--) {
-    try {
-      const v = JSON.parse(lines[i]!)
-      if (v && typeof v === 'object') return v as Record<string, unknown>
-    } catch {
-      // not this line
+/**
+ * This copy as installed: its entry in `installed_plugins.json` whose
+ * `installPath` is `root`, or else what its cache path
+ * (`cache/<marketplace>/<plugin>/<version>`) says.
+ */
+export const findInstalled = (installedJson: string, root: string): Installed | undefined => {
+  const plugins = parse(installedJson)
+  const table = isObj(plugins) && isObj(plugins.plugins) ? plugins.plugins : {}
+  for (const [id, entries] of Object.entries(table)) {
+    if (!Array.isArray(entries) || !id.includes('@')) continue
+    const hit = entries.find(en => isObj(en) && strOf(en.installPath) && norm(en.installPath as string) === norm(root))
+    if (isObj(hit)) {
+      const at = id.lastIndexOf('@')
+
+      return { id, name: id.slice(0, at), marketplace: id.slice(at + 1), scope: strOf(hit.scope), version: strOf(hit.version) }
     }
   }
+  const path = slashes(root)
+  const at = path.toLowerCase().lastIndexOf(CACHE)
+  if (at < 0) return undefined
+  const [marketplace, name, version] = path.slice(at + CACHE.length).split('/')
+  if (!marketplace || !name) return undefined
 
-  return undefined
+  return { id: `${name}@${marketplace}`, name, marketplace, version }
 }
 
-/** Reads `claude plugin update --json`'s result line. */
-export const readUpdate = (out: string, exitCode: number): UpdateOutcome => {
-  const r = lastJson(out)
-  const str = (k: string) => (typeof r?.[k] === 'string' ? (r[k] as string) : undefined)
-  if (!r || exitCode !== 0 || str('outcome') !== 'ok') {
-    return { kind: 'failed', reason: str('message') ?? str('error') ?? (out.trim().split(/\r?\n/).pop() || `exit code ${exitCode}`) }
+/** The version `installed_plugins.json` holds for `id` now (the entry of `scope`, else the first). */
+export const installedVersion = (installedJson: string, id: string, scope?: string): string | undefined => {
+  const plugins = parse(installedJson)
+  const entries = isObj(plugins) && isObj(plugins.plugins) ? plugins.plugins[id] : undefined
+  if (!Array.isArray(entries)) return undefined
+  const all = entries.filter(isObj)
+  const mine = all.find(en => scope && en.scope === scope) ?? all[0]
+
+  return mine ? strOf(mine.version) : undefined
+}
+
+/** Where a marketplace's checkout is: `known_marketplaces.json`'s `installLocation`, or the default folder. */
+export const marketplaceDir = (knownJson: string, marketplace: string, pluginsDir: string): string => {
+  const known = parse(knownJson)
+  const entry = isObj(known) ? known[marketplace] : undefined
+
+  return slashes(strOf(isObj(entry) ? entry.installLocation : undefined) ?? `${pluginsDir}/marketplaces/${marketplace}`)
+}
+
+/**
+ * The plugin's entry in a marketplace's `marketplace.json`: its own version,
+ * and the folder its `plugin.json` is in when its source is a relative path.
+ */
+export const offered = (marketplaceJson: string, name: string, dir: string): { version?: string; pluginDir?: string } => {
+  const m = parse(marketplaceJson)
+  const list = isObj(m) && Array.isArray(m.plugins) ? m.plugins : []
+  const entry = list.find(p => isObj(p) && p.name === name)
+  if (!isObj(entry)) return {}
+  const source = strOf(entry.source)
+  const isLocal = source === '.' || source?.startsWith('./')
+  const pluginDir = isLocal ? slashes(`${dir}/${source}`).replace(/\/\.(?=\/|$)/g, '') : undefined
+
+  return { version: strOf(entry.version), pluginDir }
+}
+
+/** The `version` of a `plugin.json`. */
+export const versionOf = (pluginJson: string): string | undefined => {
+  const p = parse(pluginJson)
+
+  return isObj(p) ? strOf(p.version) : undefined
+}
+
+/** Compares two semver versions by their numbers: negative when `a` is older, 0 when equal, positive when newer. */
+export const compareVersions = (a: string, b: string): number => {
+  const nums = (v: string) => v.replace(/^v/, '').split(/[.+-]/).slice(0, 3).map(n => Number.parseInt(n, 10) || 0)
+  const [x, y] = [nums(a), nums(b)]
+  for (let i = 0; i < 3; i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0)
+    if (d !== 0) return d
   }
-  const from = str('oldVersion')
-  const to = str('newVersion')
-  if (str('updateOutcome') === 'up_to_date' || (from && from === to)) return { kind: 'current', version: to ?? from }
 
-  return { kind: 'updated', from, to }
+  return 0
 }
+
+/** The last non-empty line of a command's output: what it said went wrong. */
+export const lastLine = (...outs: string[]): string | undefined =>
+  outs
+    .join('\n')
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(Boolean)
+    .pop()
 
 export const outcomeText = (o: UpdateOutcome): string => {
   switch (o.kind) {
@@ -81,15 +145,6 @@ export const outcomeText = (o: UpdateOutcome): string => {
     case 'failed':
       return `Could not check for updates: ${o.reason}`
   }
-}
-
-/** Why a refresh of the marketplace failed, or nothing when it worked. */
-export const refreshFailure = (out: string, err: string, exitCode: number, marketplace: string): string | undefined => {
-  const r = lastJson(out)
-  if (exitCode === 0 && (!r || r.outcome === 'ok')) return undefined
-  const why = typeof r?.message === 'string' ? r.message : err.trim()
-
-  return why || `could not refresh the ${marketplace} marketplace`
 }
 
 /** A thrown error from running `claude`, as the reason shown. */

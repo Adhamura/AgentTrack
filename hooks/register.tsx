@@ -29,7 +29,21 @@ import {
 import type { Filter, SectionId, Summary, TodoItem } from './board'
 import { CONFIG_FILE, applyLive, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
 import type { DocTab } from './docs'
-import { REFRESH_MS, SCOPES, UPDATE_MS, claudeArgv, findInstalled, outcomeText, readUpdate, refreshFailure, runFailure } from './update'
+import {
+  REFRESH_MS,
+  UPDATE_MS,
+  claudeArgv,
+  compareVersions,
+  findInstalled,
+  installedVersion,
+  lastLine,
+  marketplaceDir,
+  offered,
+  outcomeText,
+  pluginsDirOf,
+  runFailure,
+  versionOf,
+} from './update'
 import type { UpdateOutcome } from './update'
 import type { Motion, TabSpec } from './look'
 import { INK, PILL_H, PILL_TOP, SECTION_DOT, SUMMARY_H, TABS_H, W, tabsLayout, tabsSvg, agentRowSvg, emptyRowSvg, headerSvg, sectionHeadSvg, summaryPills, summarySvg, taskRowSvg } from './look'
@@ -1176,25 +1190,54 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
   )
 }
 
+/** A file's text, or '' when it cannot be read. */
+const readText = async ($: $, path: string): Promise<string> => {
+  try {
+    const text = await $.fs.read(path)
+
+    return typeof text === 'string' ? text : ''
+  } catch {
+    return ''
+  }
+}
+
+/** The version the marketplace's checkout offers: the plugin's own plugin.json there, else its marketplace entry. */
+const offeredVersion = async ($: $, dir: string, name: string): Promise<string | undefined> => {
+  const entry = offered(await readText($, `${dir}/.claude-plugin/marketplace.json`), name, dir)
+  const own = entry.pluginDir ? versionOf(await readText($, `${entry.pluginDir}/.claude-plugin/plugin.json`)) : undefined
+
+  return own ?? entry.version
+}
+
 /**
  * Refreshes the marketplace this plugin came from, then updates the plugin
- * from it, through the `claude` command line the person has installed.
+ * from it when it offers a newer version. What is installed and offered is
+ * read from Claude Code's own files; the `claude` command line only runs the
+ * refresh and the update, with no option a build might lack.
  */
 const checkUpdates = async ($: $): Promise<UpdateOutcome> => {
   const root = $.plugin.root
+  const plugins = pluginsDirOf(root)
+  if (!plugins) return { kind: 'local' }
+  const installedFile = `${plugins}/installed_plugins.json`
+  const me = findInstalled(await readText($, installedFile), root)
+  if (!me) return { kind: 'local' }
+  const from = me.version ?? versionOf(await readText($, `${root}/.claude-plugin/plugin.json`))
   try {
-    const listed = await $.process.run(claudeArgv(root, ['plugin', 'list', '--json']), { timeoutMs: 30_000 })
-    if (listed.exitCode !== 0) return { kind: 'failed', reason: listed.stderr.trim() || 'claude plugin list failed' }
-    const me = findInstalled(listed.stdout, root)
-    if (!me) return { kind: 'local' }
-    const marketplace = me.id.slice(me.id.indexOf('@') + 1)
-    const refreshed = await $.process.run(claudeArgv(root, ['plugin', 'marketplace', 'update', marketplace, '--json']), { timeoutMs: REFRESH_MS })
-    const failed = refreshFailure(refreshed.stdout, refreshed.stderr, refreshed.exitCode, marketplace)
-    if (failed) return { kind: 'failed', reason: failed }
-    const scope = me.scope && SCOPES.includes(me.scope) ? ['--scope', me.scope] : []
-    const updated = await $.process.run(claudeArgv(root, ['plugin', 'update', me.id, '--json', ...scope]), { timeoutMs: UPDATE_MS })
+    const refreshed = await $.process.run(claudeArgv(root, ['plugin', 'marketplace', 'update', me.marketplace]), { timeoutMs: REFRESH_MS })
+    if (refreshed.exitCode !== 0) {
+      return { kind: 'failed', reason: lastLine(refreshed.stderr, refreshed.stdout) ?? `could not refresh the ${me.marketplace} marketplace` }
+    }
+    const dir = marketplaceDir(await readText($, `${plugins}/known_marketplaces.json`), me.marketplace, plugins)
+    const latest = await offeredVersion($, dir, me.name)
+    if (latest && from && compareVersions(latest, from) <= 0) return { kind: 'current', version: from }
+    const scope = me.scope && me.scope !== 'user' ? ['--scope', me.scope] : []
+    const updated = await $.process.run(claudeArgv(root, ['plugin', 'update', me.id, ...scope]), { timeoutMs: UPDATE_MS })
+    if (updated.exitCode !== 0) return { kind: 'failed', reason: lastLine(updated.stderr, updated.stdout) ?? `could not update ${me.id}` }
+    const to = installedVersion(await readText($, installedFile), me.id, me.scope) ?? latest
+    if (to && from && compareVersions(to, from) <= 0) return { kind: 'current', version: from }
 
-    return readUpdate(updated.stdout, updated.exitCode)
+    return { kind: 'updated', from, to }
   } catch (err) {
     return runFailure(err)
   }
