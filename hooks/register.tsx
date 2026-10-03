@@ -33,7 +33,7 @@ import {
   syncAgents,
 } from './board'
 import type { Filter, Scope, SectionId, Summary, TodoItem } from './board'
-import { CONFIG_FILE, applyLive, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
+import { CONFIG_FILE, applyLive, columnsOf, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
 import type { DocTab } from './docs'
 import {
   REFRESH_MS,
@@ -1048,6 +1048,10 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
 }
 
 /** A project tab: one checklist file in the board's design. */
+/** A checklist line as words: its name, its status, and each part's. */
+const itemAlt = (item: DocItem) =>
+  `${item.title}: ${item.status}${item.facets ? `; ${item.facets.map(f => `${f.key} ${f.isDone ? 'done' : 'not done'}`).join(', ')}` : ''}`
+
 const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
   const raw = (await read($, docs))[pane]
   if (!raw) return undefined
@@ -1196,8 +1200,10 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                     when: '',
                     flat: true,
                     mark: words,
+                    columns: columnsOf(section.items),
+                    facets: item.facets,
                   }),
-                  `${item.title}: ${item.status}`,
+                  itemAlt(item),
                   undefined,
                   more(item.id),
                 ),
@@ -1234,8 +1240,10 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                         order: gMotion === 'open' ? k : undefined,
                         when: '',
                         mark: words,
+                        columns: columnsOf(group.items),
+                        facets: item.facets,
                       }),
-                      `${item.title}: ${item.status}`,
+                      itemAlt(item),
                       undefined,
                       more(item.id),
                     ),
@@ -1283,6 +1291,11 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
           onPress={() => pickBy(`${pane}::${item.id}`)}
         />
       </Box>
+      {item.facets?.map(f => (
+        <Text key={`facet-${pane}-${item.id}-${f.key}`} color={f.isDone ? C.green : C.gray}>
+          {f.isDone ? '●' : '○'} {f.key}
+        </Text>
+      ))}
     </Box>
   )
 

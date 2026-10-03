@@ -51,7 +51,15 @@ export type DocItem = {
   status: TaskStatus
   /** The running work this open item was matched to, which marks it in progress. */
   liveBy?: string
+  /**
+   * The parts of a `name — part, part` line, each its own column: done unless
+   * it says no (`no art`, `not built`, `(0 props)`).
+   */
+  facets?: Facet[]
 }
+
+/** One part of a checklist line: its column (`art` for both `art` and `no art`), its words, and whether it is done. */
+export type Facet = { key: string; label: string; isDone: boolean }
 
 /** A `##` section: items right under it, and its `###` groups. */
 export type DocSection = {

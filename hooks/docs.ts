@@ -4,7 +4,7 @@
  * item (`[~]`, `[-]` or `[/]` mark one in progress). A group's or section's
  * progress is its items'.
  */
-import type { Category, DocBoard, DocItem, DocSection, Task } from '../types'
+import type { Category, DocBoard, DocItem, DocSection, Facet, Task } from '../types'
 import { sameWork } from './match'
 
 export type DocTab = {
@@ -58,6 +58,49 @@ const nameOf = (text: string) => {
   return plain.length > 70 ? `${plain.slice(0, 69).trimEnd()}…` : plain
 }
 
+/** Words that say a part is not done yet. */
+const NOT_DONE = /\b(no|not|none|missing|without|todo|tbd|pending|needs?|wip)\b|\bn\/a\b|(^|\()\s*0\b/i
+/** What a part says, without the words that say it is not done and without counts: its column. */
+const facetKey = (label: string) =>
+  label
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\b(no|not|none|missing|without|todo|tbd|pending|needs?|wip|yet)\b|\bn\/a\b/g, ' ')
+    .replace(/\b\d+\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || label.toLowerCase().trim()
+
+/** A line's name and its parts, when it reads `name — part, part`; the parts are short. */
+export const splitFacets = (body: string): { name: string; facets: Facet[] } | undefined => {
+  const at = /\s+[\u2014\u2013]\s+|\s+--?\s+/.exec(body)
+  if (!at) return undefined
+  const name = body.slice(0, at.index).trim()
+  const parts = body
+    .slice(at.index + at[0].length)
+    .replace(/\.$/, '')
+    .split(/\s*[,;]\s*/)
+    .map(p => p.trim())
+    .filter(Boolean)
+  if (!name || parts.length === 0 || parts.length > 6 || parts.some(p => p.length > 40 || p.split(/\s+/).length > 6)) return undefined
+
+  return { name, facets: parts.map(label => ({ key: facetKey(label), label, isDone: !NOT_DONE.test(label) })) }
+}
+
+/**
+ * Gives a list's items their parts as columns, when the list is written that
+ * way: at least one of its lines has two parts or more (so a lone `— note`
+ * stays part of the name).
+ */
+const withFacets = (items: DocItem[], bodies: ReadonlyMap<string, string>): DocItem[] => {
+  const split = items.map(i => ({ item: i, parts: splitFacets(bodies.get(i.id) ?? '') }))
+  if (!split.some(s => (s.parts?.facets.length ?? 0) >= 2)) return items
+
+  return split.map(({ item, parts }) => (parts ? { ...item, title: nameOf(parts.name), facets: parts.facets } : item))
+}
+
+/** The columns a list's items have, in the order they first come. */
+export const columnsOf = (items: readonly DocItem[]): string[] => [...new Set(items.flatMap(i => i.facets?.map(f => f.key) ?? []))]
+
 export const parseDoc = (text: string, tab: DocTab): DocBoard => {
   const strips = (tab.strip ?? []).flatMap(p => {
     try {
@@ -72,6 +115,7 @@ export const parseDoc = (text: string, tab: DocTab): DocBoard => {
   let section: DocSection | undefined
   let group: DocSection['groups'][number] | undefined
   let n = 0
+  const bodies = new Map<string, string>()
 
   for (const line of text.split(/\r?\n/)) {
     const head = /^(#{1,3})\s+(.*)$/.exec(line)
@@ -99,11 +143,16 @@ export const parseDoc = (text: string, tab: DocTab): DocBoard => {
       detail: body.replace(/\*\*/g, '').replace(/`/g, ''),
       status: /x/i.test(mark) ? 'completed' : mark === ' ' ? 'pending' : 'in_progress',
     }
+    bodies.set(entry.id, body.replace(/\*\*/g, '').replace(/`/g, ''))
     ;(group ?? section).items.push(entry)
   }
 
   const kept = sections
-    .map(s => ({ ...s, groups: s.groups.filter(g => g.items.length > 0) }))
+    .map(s => ({
+      ...s,
+      items: withFacets(s.items, bodies),
+      groups: s.groups.filter(g => g.items.length > 0).map(g => ({ ...g, items: withFacets(g.items, bodies) })),
+    }))
     .filter(s => tab.keepEmptySections || s.items.length + s.groups.length > 0)
 
   return { title, file: tab.file, sections: kept, updatedAt: 0 }
