@@ -32,4 +32,6 @@ The marketplace serves `main`, so a change is finished only when it is on `main`
 2. wait for the Check workflow on it to pass (fix and push again if it fails);
 3. merge the pull request yourself (merge commit), then tell the user it is live.
 
+A merge that raises the version publishes the GitHub release by itself (`.github/workflows/release.yml`: tag `v<version>`, the zip from `scripts/pack.mjs`, generated notes), so pull request titles should read well as release notes.
+
 Ask before merging only when the change is risky or the user said not to merge.
