@@ -132,7 +132,7 @@ describe('board model', () => {
     ])
     expect(merged.categories.map(c => c.title)).toEqual(['Game build', 'Docs'])
     expect(merged.categories[0]?.tasks.length).toBe(1)
-    expect(merged.categories[1]?.note).toBe('docs · idle · no board (mod not loaded there)')
+    expect(merged.categories[1]?.note).toBe('docs · idle · no board (Agent Track not loaded there)')
     expect(grouped(merged).find(s => s.id === 'working')?.categories[0]?.title).toBe('Game build')
   })
 })
