@@ -99,6 +99,8 @@ declare module 'claude-code' {
       filter: Record<string, 'all' | TaskStatus>
       /** The board's shown tab: the pane id, or a project tab's id. */
       view: string
+      /** True while Check updates refreshes the marketplace and updates the plugin. */
+      updating: boolean
     }
   }
 }

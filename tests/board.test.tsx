@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { applyLive, itemsOf, parseDoc, tabPaneId } from '../hooks/docs'
 import { partial, sameWork } from '../hooks/match'
+import { claudeArgv, findInstalled, readUpdate } from '../hooks/update'
 import { applyTodoWrite, emptyBoard, grouped, mergePeers, relTime, rowCheck, summarize } from '../hooks/board'
 
 const PANE = { component: 'Pane', requestId: 'agent-track' } as const
@@ -204,6 +205,47 @@ test('the Progress button above the message box opens the board', async ($, on) 
   expect(opened.filter(id => id === 'agent-track').length).toBe(2)
 })
 
+
+test('Check updates from a copy loaded from a folder says to pull that folder, and updates nothing', async ($, on) => {
+  const ran: string[] = []
+  const toasts: string[] = []
+  on('process.run', ($, e) => {
+    ran.push(e.argv.join(' '))
+    const stdout = JSON.stringify([{ id: 'agent-track@agent-track', scope: 'user', installPath: '/home/k/.claude/plugins/cache/agent-track/agent-track/1.2.0' }])
+
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+
+    return { value: undefined }
+  })
+  const ui = await $.ui.mount({
+    plugin: 'agent-track',
+    surface: 'desktop',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, maxRows: 4, bodyColumns: 80, scroll: { offset: 0, bodyRows: 4, totalRows: 1 } } as never,
+  })
+  expect(await ui.find({ key: 'check-updates' })).toBeDefined()
+  await ui.press({ key: 'check-updates' })
+  await ui.unmount()
+  expect(ran).toEqual(['claude plugin list --json'])
+  expect(toasts.some(t => /runs from a folder/.test(t))).toBe(true)
+})
+
+test('update results read as up to date, updated or failed', async () => {
+  expect(readUpdate('{"outcome":"ok","updateOutcome":"up_to_date","oldVersion":"1.2.0","newVersion":"1.2.0"}', 0)).toEqual({ kind: 'current', version: '1.2.0' })
+  expect(readUpdate('noise\n{"outcome":"ok","oldVersion":"1.2.0","newVersion":"1.3.0"}', 0)).toEqual({ kind: 'updated', from: '1.2.0', to: '1.3.0' })
+  expect(readUpdate('{"outcome":"error","message":"offline"}', 1)).toEqual({ kind: 'failed', reason: 'offline' })
+  expect(findInstalled('[{"id":"agent-track@mine","installPath":"C:\\\\Users\\\\k\\\\cache\\\\1.2.0"}]', 'c:/users/k/cache/1.2.0/')?.id).toBe('agent-track@mine')
+  expect(findInstalled('[{"id":"other@x"}]', '/p')).toBeUndefined()
+  const cache = '/home/k/.claude/plugins/cache/agent-track/agent-track/1.2.0'
+  expect(findInstalled(`[{"id":"agent-track@agent-track","scope":"user","installPath":"${cache}"}]`, cache)?.scope).toBe('user')
+  expect(findInstalled('[{"id":"agent-track@agent-track"}]', `${cache}/`)?.id).toBe('agent-track@agent-track')
+  expect(findInstalled('[{"id":"agent-track@agent-track","installPath":"/home/k/.claude/plugins/cache/agent-track/agent-track/1.2.0"}]', '/home/k/dev/agent-track')).toBeUndefined()
+  expect(claudeArgv('C:\\Users\\k', ['plugin', 'list'])).toEqual(['cmd.exe', '/d', '/s', '/c', 'claude', 'plugin', 'list'])
+  expect(claudeArgv('/home/k', ['plugin', 'list'])).toEqual(['claude', 'plugin', 'list'])
+})
 
 test('the summary pills filter the board by status, with All as the way back', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
