@@ -33,7 +33,7 @@ import {
   syncAgents,
 } from './board'
 import type { Filter, Scope, SectionId, Summary, TodoItem } from './board'
-import { CONFIG_FILE, applyLive, columnsOf, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
+import { CONFIG_FILE, applyLive, columnCounts, columnsOf, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
 import type { DocTab } from './docs'
 import {
   REFRESH_MS,
@@ -1225,8 +1225,11 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                     order: sectionMotion === 'open' ? ownItems.length + j : undefined,
                     when: `${gc.percent}%`,
                     mark: words,
+                    columns: columnCounts(group.items),
                   }),
-                  `${group.title}: ${gc.done}/${gc.total}, ${gOpen ? 'expanded' : 'collapsed'}`,
+                  `${group.title}: ${gc.done}/${gc.total}${columnCounts(group.items)
+                    .map(col => `, ${col.key} ${col.done}/${col.total}`)
+                    .join('')}, ${gOpen ? 'expanded' : 'collapsed'}`,
                   <Button key={`group-${pane}:${group.id}`} plain label={hit(74 / 925)} onPress={() => toggle(gkey, !gOpen)} />,
                 ),
               )
@@ -1352,6 +1355,11 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                         onPress={() => toggle(gkey, !gOpen)}
                       />
                       <Box flexGrow={1}>{markedText(els, group.title, words, { wrap: 'truncate-end' })}</Box>
+                      {columnCounts(group.items).map(col => (
+                        <Text key={`count-${pane}-${group.id}-${col.key}`} color={col.done === col.total ? C.green : C.gray}>
+                          {col.key} {col.done}/{col.total}
+                        </Text>
+                      ))}
                       <Text color={gc.done === gc.total ? C.green : C.blue}>
                         {ringGlyph(gc.total ? gc.done / gc.total : 0)}
                       </Text>

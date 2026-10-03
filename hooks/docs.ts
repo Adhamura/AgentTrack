@@ -101,6 +101,14 @@ const withFacets = (items: DocItem[], bodies: ReadonlyMap<string, string>): DocI
 /** The columns a list's items have, in the order they first come. */
 export const columnsOf = (items: readonly DocItem[]): string[] => [...new Set(items.flatMap(i => i.facets?.map(f => f.key) ?? []))]
 
+/** Each column with how many of the list's lines have that part done, of the lines that have it. */
+export const columnCounts = (items: readonly DocItem[]) =>
+  columnsOf(items).map(key => {
+    const parts = items.flatMap(i => i.facets?.filter(f => f.key === key) ?? [])
+
+    return { key, done: parts.filter(f => f.isDone).length, total: parts.length }
+  })
+
 export const parseDoc = (text: string, tab: DocTab): DocBoard => {
   const strips = (tab.strip ?? []).flatMap(p => {
     try {

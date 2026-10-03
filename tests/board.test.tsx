@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { applyLive, columnsOf, itemsOf, parseDoc, splitFacets, tabPaneId } from '../hooks/docs'
+import { applyLive, columnCounts, columnsOf, itemsOf, parseDoc, splitFacets, tabPaneId } from '../hooks/docs'
 import { partial, sameWork } from '../hooks/match'
 import { claudeArgv, compareVersions, findInstalled, installedVersion, lastLine, marketplaceDir, offered, outcomeText, pluginsDirOf, versionOf } from '../hooks/update'
 import { matches, runs, terms } from '../hooks/search'
@@ -553,6 +553,11 @@ test('a line written as name — part, part gets a column per part, done unless 
   const group = doc.sections[0]!.groups[0]!
   expect(group.items.map(i => i.title)).toEqual(['cg-alms-vault', 'cg-choir'])
   expect(columnsOf(group.items)).toEqual(['dressed', 'art', 'built'])
+  expect(columnCounts(group.items)).toEqual([
+    { key: 'dressed', done: 0, total: 1 },
+    { key: 'art', done: 0, total: 2 },
+    { key: 'built', done: 0, total: 1 },
+  ])
   // A list with no line of two parts keeps its names whole.
   expect(doc.sections[1]!.items[0]).toMatchObject({ title: 'Story — draft the intro' })
   expect(doc.sections[1]!.items[0]!.facets).toBeUndefined()
