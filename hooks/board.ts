@@ -175,7 +175,7 @@ export const countTasks = (tasks: readonly Task[]): Counts => {
   }
 }
 
-export type Summary = Counts & { unit: 'tasks' | 'items' }
+export type Summary = Counts & { unit: 'items' }
 
 const add = (a: Counts, b: Omit<Counts, 'percent'>) => ({
   total: a.total + b.total,
@@ -186,29 +186,29 @@ const add = (a: Counts, b: Omit<Counts, 'percent'>) => ({
 })
 
 /**
- * What one row adds to the summary: its tasks, or, for a row with no todo
- * list, the row itself as one item in the state its section shows.
+ * What one row adds to the summary: its tasks. A row with no todo list (an
+ * idle session, an agent that keeps none) adds nothing; it shows a dash.
  */
-export const rowItems = (cat: Category): Omit<Counts, 'percent'> => {
-  if (cat.tasks.length > 0) return countTasks(cat.tasks)
-  const section = sectionOf(cat)
+export const rowItems = (cat: Category): Omit<Counts, 'percent'> => countTasks(cat.tasks)
 
-  return {
-    total: 1,
-    done: section === 'done' ? 1 : 0,
-    inProgress: section === 'working' ? 1 : 0,
-    notStarted: section === 'waiting' ? 1 : 0,
-  }
-}
+/**
+ * This session's own row before it wrote a todo list: not an item of work
+ * yet, so it adds nothing to the counts (another session's row says where it
+ * runs in its note, and an agent's row is work under way).
+ */
+export const isBare = (cat: Category) => cat.tasks.length === 0 && cat.kind === 'session' && !cat.note
 
-/** The header's numbers, counted from exactly the rows the board shows. */
+/** A board with nothing on it yet but this session's bare row: the board shows its empty state. */
+export const isBlank = (board: Board) => board.categories.every(isBare)
+
+/** The header's numbers, counted from exactly the rows the board shows; one unit, items, on every tab. */
 export const summarize = (board: Board): Summary => {
   const sum = board.categories.reduce((acc, cat) => add(acc, rowItems(cat)), countTasks([]))
 
   return {
     ...sum,
     percent: sum.total === 0 ? 0 : Math.round((sum.done / sum.total) * 100),
-    unit: board.categories.every(c => c.tasks.length > 0) ? 'tasks' : 'items',
+    unit: 'items',
   }
 }
 
@@ -224,8 +224,8 @@ export type SectionId = 'working' | 'waiting' | 'done'
 
 export const SECTIONS: readonly { id: SectionId; title: string; empty: string }[] = [
   { id: 'working', title: 'Working', empty: 'No agent is working right now.' },
-  { id: 'waiting', title: 'Not started', empty: 'Nothing is waiting to start.' },
-  { id: 'done', title: 'Done', empty: 'Finished agents and lists land here.' },
+  { id: 'waiting', title: 'Idle', empty: 'No idle sessions.' },
+  { id: 'done', title: 'Done', empty: 'Finished agents land here.' },
 ]
 
 export const sectionOf = (cat: Category): SectionId => {
@@ -394,14 +394,45 @@ export const currentStep = (cat: Category): string => {
   return cat.tasks.find(t => t.status === 'pending')?.title ?? ''
 }
 
+/** How long ago, in a pill's few characters: '' for no time (the pill shows a dash), at most "99d+". */
 export const relTime = (at: number | undefined, now: number): string => {
-  if (at === undefined || !Number.isFinite(at)) return ''
+  if (at === undefined || !Number.isFinite(at) || at <= 0) return ''
   const s = Math.max(0, Math.round((now - at) / 1000))
   if (s < 60) return 'now'
   if (s < 3600) return `${Math.floor(s / 60)}m`
   if (s < 86400) return `${Math.floor(s / 3600)}h`
+  const d = Math.floor(s / 86400)
 
-  return `${Math.floor(s / 86400)}d`
+  return d > 99 ? '99d+' : `${d}d`
+}
+
+/** How long ago, as words: "18m ago", "just now". */
+export const ago = (at: number | undefined, now: number): string => {
+  const t = relTime(at, now)
+
+  return t === '' ? '' : t === 'now' ? 'just now' : `${t} ago`
+}
+
+/** A task's times as one line of words: when it started or finished, and how long it took. */
+export const taskTimes = (task: Task, now: number): string => {
+  const spent = duration(task.startedAt, task.completedAt ?? (task.status === 'in_progress' ? now : undefined))
+  if (task.status === 'completed') {
+    return [`Finished ${ago(task.completedAt, now) || '—'}`, task.startedAt ? `took ${spent}` : ''].filter(Boolean).join(' · ')
+  }
+  if (task.status === 'in_progress') return `Started ${ago(task.startedAt, now) || '—'} · ${spent} so far`
+
+  return `Added ${ago(task.createdAt, now) || '—'} · not started`
+}
+
+/** A group's second line: what is under way in it, else what comes next. */
+export const nextStep = (cat: Category): string => {
+  const active = cat.tasks.find(t => t.status === 'in_progress')
+  if (active) return `Now: ${active.activeForm ?? active.title}`
+  const c = countTasks(cat.tasks)
+  if (c.total > 0 && c.done === c.total) return 'All done'
+  const next = cat.tasks.find(t => t.status === 'pending')
+
+  return next ? `Next: ${next.title}` : ''
 }
 
 export const clock = (at: number | undefined): string => {

@@ -1,29 +1,31 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
-import type { Category, DocBoard, DocItem, Peer, Snapshot, Task } from '../types'
+import type { Category, DocBoard, DocItem, Peer, Snapshot, Task, TaskStatus } from '../types'
 import {
   MAIN,
+  ago,
   applyTaskCreate,
   applyTaskUpdate,
   applyTodoWrite,
-  clock,
   countTasks,
   currentStep,
-  duration,
   emptyBoard,
   ensureCategory,
   grouped,
+  isBlank,
   mergePeers,
   hasCategory,
+  nextStep,
   relTime,
   ringGlyph,
+  sectionOf,
   setLive,
   summarize,
-  rowCheck,
   rowItems,
   bar,
   keepsRow,
+  taskTimes,
   tasksFor,
   SCOPES,
   isScope,
@@ -33,7 +35,7 @@ import {
   syncAgents,
 } from './board'
 import type { Filter, Scope, SectionId, Summary, TodoItem } from './board'
-import { CONFIG_FILE, applyLive, columnCounts, columnsOf, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
+import { CONFIG_FILE, applyLive, countsFor, groupAsCategory, itemAsTask, itemNote, itemsOf, parseConfig, parseDoc, sectionColumns, tabPaneId } from './docs'
 import type { DocTab } from './docs'
 import {
   REFRESH_MS,
@@ -52,8 +54,51 @@ import {
 } from './update'
 import type { UpdateOutcome } from './update'
 import { matches, runs, terms } from './search'
-import type { Motion, TabSpec } from './look'
-import { INK, PILL_H, PILL_TOP, SCOPE_LABEL, SECTION_DOT, SUMMARY_H, TABS_H, W, scopeLayout, tabsLayout, tabsSvg, agentRowSvg, emptyRowSvg, headerSvg, sectionHeadSvg, summaryPills, summarySvg, taskRowSvg } from './look'
+import type { ColumnPlan, Layout, Motion, TabSpec, Tone } from './look'
+import {
+  EMPTY_H,
+  HIT_KEY,
+  NOTHING_H,
+  NOTHING_LINK_Y,
+  PILL_H,
+  PILL_TOP,
+  ROW_H,
+  SCOPE_H,
+  SCOPE_LABEL,
+  SCOPE_TOP,
+  SECTION_H,
+  SECTION_TONE,
+  STATUS,
+  SUMMARY_H,
+  TABS_H,
+  TASK_H,
+  TONE_KEY,
+  detailClose,
+  detailH,
+  detailSvg,
+  emptyRowSvg,
+  headerSvg,
+  maxColumns,
+  nothingSvg,
+  tabsHeight,
+  textW,
+  useScheme,
+  layout,
+  noticeH,
+  noticeSvg,
+  planColumns,
+  rowSub,
+  rowSvg,
+  scopeLayout,
+  sectionHeadSvg,
+  summaryLayout,
+  summarySvg,
+  tabsLayout,
+  tabsSvg,
+  taskRowSvg,
+  toneOf,
+  widthFor,
+} from './look'
 
 const PANE = 'agent-track'
 const TODO_TOOL = 'mcp__agent-track__todo'
@@ -82,14 +127,15 @@ const SCOPE_STORE = 'scope'
 
 /** How long after a toggle its drawing still plays the turn. */
 const MOTION_MS = 700
-/** The shown pane's width in cells, as its last drawing read it: what sizes the click targets. */
+/** The shown pane's width in cells, as its last drawing read it: what sizes the drawings and the click targets. */
 let paneColumns = 80
 /**
  * The label of a Button with nothing visible, laid over a share (0..1) of a
  * drawing's width: figure spaces, which neither wrap nor collapse, a little
  * more than fill that share of the pane, so no edge of the cell is left dead.
  */
-const hit = (share: number) => '\u2007'.repeat(Math.max(3, Math.ceil(paneColumns * share * 1.5)))
+const hit = (share: number) =>
+  '\u2007'.repeat(Math.min(HIT_ROOM - 2, Math.max(3, Math.ceil(Math.min(paneColumns, maxColumns()) * share * 1.5))))
 /**
  * The room, in cells, a click target's Button is laid out in: wider than any
  * pane and centered on the target's cell, so the label always fits whole (a desktop cuts a label
@@ -97,30 +143,22 @@ const hit = (share: number) => '\u2007'.repeat(Math.max(3, Math.ceil(paneColumns
  * clips what spills past its edges, pointer and paint alike.
  */
 const HIT_ROOM = 400
-/** The width, as a share of a drawn strip, that centers a click target on a chevron drawn at `cx` (of 925). */
-const hitWidth = (cx: number) => `${Math.round((2 * cx * 100) / 925)}%`
 /** A section's progress: the summed items of its rows. */
 const sectionProgress = (cats: readonly Category[]) =>
   cats.map(rowItems).reduce((a, b) => ({ done: a.done + b.done, total: a.total + b.total }), { done: 0, total: 0 })
+/** How many finished rows the Done section lists before "Show all". */
+const DONE_SHOWN = 5
 
 /** How old a closed session's published board may be and still show. */
 const KEEP_MS = 12 * 60 * 60 * 1000
-
-const C = {
-  green: '#3fa66b',
-  amber: '#d49a1f',
-  blue: '#4a8fe7',
-  gray: '#8a8a8a',
-}
 
 type $ = EngineInterface
 type Els = ReturnType<EngineInterface['ui']['resolve']>
 type SvgEl = Extract<Els, { Svg: unknown }>['Svg']
 
-const pct = (px: number, of: number) => `${Math.round((px * 100) / of)}%`
 const FILTER_ALT: Record<Filter, string> = {
   all: 'all',
-  completed: 'completed',
+  completed: 'done',
   in_progress: 'in progress',
   pending: 'not started',
 }
@@ -129,31 +167,28 @@ const FILTER_ALT: Record<Filter, string> = {
 const pickFilter = ($: $, pane: string, f: Filter) =>
   update($, filters, all => ({ ...all, [pane]: all[pane] === f ? 'all' : f }))
 
+/** One click target over a drawing: its share of the drawing's width, in the drawing's own units. */
+type Spot = { key: string; x: number; w: number; onPress: () => void }
+
 /**
- * Click targets over a drawing: a row laid over it whose boxes take each
- * target's own share of the drawing's width (whole percents, rounded at each
- * edge so the cells add up without drifting) and the band `top`..`top + band` of its height.
+ * Click targets over a drawing `w` wide: a row laid over it whose boxes take
+ * each target's own share of the width (whole percents, rounded at each edge
+ * so the cells add up without drifting) and the band `top`..`top + band` of its height.
  */
-const hitRow = (
-  els: Els,
-  height: number,
-  top: number,
-  band: number,
-  spots: readonly { key: string; x: number; w: number; onPress: () => void }[],
-) => {
+const hitRow = (els: Els, w: number, height: number, top: number, band: number, spots: readonly Spot[]) => {
   const { Box, Button } = els
-  const at = (px: number) => Math.round((px * 100) / W)
+  const at = (px: number) => Math.max(0, Math.min(100, Math.round((px * 100) / w)))
   let end = 0
   const cells = spots.flatMap(p => {
-    const [from, to] = [at(p.x), at(p.x + p.w)]
+    const [from, to] = [Math.max(end, at(p.x)), at(p.x + p.w)]
     const gap = from - end
     end = to
 
     return [
-      <Box key={`gap-${p.key}`} width={`${gap}%`} />,
-      <Box key={`spot-${p.key}`} width={`${to - from}%`} overflow="hidden" flexDirection="row" alignItems="center" justifyContent="center">
+      ...(gap > 0 ? [<Box key={`gap-${p.key}`} width={`${gap}%`} />] : []),
+      <Box key={`spot-${p.key}`} width={`${Math.max(0, to - from)}%`} overflow="hidden" flexDirection="row" alignItems="center" justifyContent="center">
         <Box width={HIT_ROOM} flexShrink={0} flexDirection="row" alignItems="center" justifyContent="center">
-          <Button key={p.key} plain label={hit(p.w / W)} onPress={p.onPress} />
+          <Button key={p.key} plain label={hit(p.w / w)} onPress={p.onPress} />
         </Box>
       </Box>,
     ]
@@ -161,34 +196,51 @@ const hitRow = (
 
   return (
     <Box position="absolute" left={0} right={0} top={0} bottom={0} flexDirection="column">
-      <Box height={pct(top, height)} />
-      <Box height={pct(band, height)} flexDirection="row">
+      {top > 0 && <Box height={`${Math.round((top * 100) / height)}%`} />}
+      <Box height={`${Math.round((band * 100) / height)}%`} flexDirection="row">
         {cells}
       </Box>
     </Box>
   )
 }
 
-/** The drawn summary card with a click target over each status pill. */
-const summaryCard = ($: $, els: Els, Art: SvgEl, pane: string, sum: Summary, filter: Filter) => {
+/** One drawn strip, with click targets over the whole of its height. */
+const strip = (els: Els, Art: SvgEl, lay: Layout, height: number, source: string, alt: string, spots: readonly Spot[] = []) => (
+  <els.Box flexDirection="column">
+    <Art source={source} alt={alt} />
+    {spots.length > 0 && hitRow(els, lay.w, height, 0, height, spots)}
+  </els.Box>
+)
+
+/** "2 of 4 done": a count as a reader hears it. */
+const ofDone = (done: number, total: number) => `${done} of ${total} done`
+
+/** The drawn summary card: a click target over each status pill, and over each scope option when it has the switch. */
+const summaryCard = ($: $, els: Els, Art: SvgEl, lay: Layout, pane: string, sum: Summary, filter: Filter, picked?: Scope) => {
   const { Box } = els
+  const at = summaryLayout(lay, sum, picked ? SCOPES : undefined)
 
   return (
     <Box marginY={1} flexDirection="column">
       <Art
-        source={summarySvg(sum, filter)}
-        alt={`${sum.percent}%: ${sum.done} completed, ${sum.inProgress} in progress, ${sum.notStarted} not started. Showing ${FILTER_ALT[filter]}.`}
+        source={summarySvg(lay, sum, filter, sum.unit, picked ? { scopes: SCOPES, picked } : undefined)}
+        alt={`${sum.percent}%, ${ofDone(sum.done, sum.total)}: ${sum.inProgress} in progress, ${sum.notStarted} not started. Showing ${FILTER_ALT[filter]}.${picked ? ` Sessions: ${SCOPE_LABEL[picked]}.` : ''}`}
       />
       {hitRow(
         els,
+        lay.w,
         SUMMARY_H,
         PILL_TOP,
         PILL_H,
-        summaryPills(sum).map(p => ({ key: `filter-${pane}:${p.id}`, x: p.x, w: p.w, onPress: () => void pickFilter($, pane, p.id) })),
+        at.pills.map(p => ({ key: `filter-${pane}:${p.id}`, x: p.x, w: p.w, onPress: () => void pickFilter($, pane, p.id) })),
       )}
+      {picked && hitRow(els, lay.w, SUMMARY_H, SCOPE_TOP, SCOPE_H, scopeSpots($, at.scope))}
     </Box>
   )
 }
+
+const scopeSpots = ($: $, at: readonly { id: Scope; x: number; w: number }[]): Spot[] =>
+  at.map(o => ({ key: `scope-${o.id}`, x: o.x, w: o.w, onPress: () => void pickScope($, o.id) }))
 
 /** The board's tabs: each project checklist, then Agents last, each with its percent. */
 const tabList = async ($: $): Promise<TabSpec[]> => {
@@ -208,64 +260,76 @@ const tabList = async ($: $): Promise<TabSpec[]> => {
   ]
 }
 
-/** The desktop tab bar: drawn, with a click target over each tab. */
-const tabStrip = ($: $, els: Els, Art: SvgEl, tabs: readonly TabSpec[], active: string, picked: Scope) => {
-  const { Box } = els
-  // A single tab needs no tab of its own: the bar then holds the scope switch alone.
-  const shown = tabs.length > 1 ? tabs : []
+/** The desktop tab bar: drawn, with a click target over each tab; none when there is one tab. */
+const tabStrip = ($: $, els: Els, Art: SvgEl, lay: Layout, tabs: readonly TabSpec[], active: string) => {
+  if (tabs.length < 2) return null
+  const at = tabsLayout(lay, tabs)
+  const height = tabsHeight(lay, tabs)
+  const rows = [...new Set(at.map(t => t.y))]
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Art
-        source={tabsSvg(shown, active, { scopes: SCOPES, picked })}
-        alt={`${shown.length > 0 ? `Tabs: ${shown.map(t => (t.id === active ? `${t.title} (shown)` : t.title)).join(', ')}. ` : ''}Showing: ${SCOPE_LABEL[picked]}`}
-      />
-      {hitRow(els, TABS_H, 0, TABS_H, [
-        ...tabsLayout(shown).map(t => ({ key: `tab-${t.id}`, x: t.x, w: t.w, onPress: () => void update($, view, () => t.id) })),
-        ...scopeLayout(SCOPES).map(o => ({ key: `scope-${o.id}`, x: o.x, w: o.w, onPress: () => void pickScope($, o.id) })),
-      ])}
-    </Box>
+    <els.Box flexDirection="column">
+      <Art source={tabsSvg(lay, tabs, active)} alt={`Tabs: ${tabs.map(t => `${t.title}${t.percent === undefined ? '' : ` ${t.percent}%`}${t.id === active ? ' (shown)' : ''}`).join(', ')}`} />
+      {rows.map(y =>
+        hitRow(
+          els,
+          lay.w,
+          height,
+          y,
+          TABS_H,
+          at.filter(t => t.y === y).map(t => ({ key: `tab-${t.id}`, x: t.x, w: t.w, onPress: () => void update($, view, () => t.id) })),
+        ),
+      )}
+    </els.Box>
   )
 }
 
 /** The terminal tab bar: a Button per tab, the shown one in brackets. */
-const tabRowText = ($: $, els: Els, tabs: readonly TabSpec[], active: string, picked: Scope) => {
+const tabRowText = ($: $, els: Els, tabs: readonly TabSpec[], active: string) => {
   const { Box, Button } = els
+  if (tabs.length < 2) return null
 
   return (
-    <Box flexDirection="row" gap={2} marginBottom={1} justifyContent="space-between">
-      <Box flexDirection="row" gap={2} flexShrink={1}>
-        {(tabs.length > 1 ? tabs : []).map(t => {
-          const label = `${t.title}${t.percent === undefined ? '' : ` ${t.percent}%`}`
+    <Box flexDirection="row" gap={2} marginBottom={1} flexWrap="wrap">
+      {tabs.map(t => {
+        const label = `${t.title}${t.percent === undefined ? '' : ` ${t.percent}%`}`
 
-          return (
-            <Button
-              key={`tab-${t.id}`}
-              plain
-              label={t.id === active ? `[${label}]` : label}
-              dimColor={t.id !== active}
-              onPress={() => void update($, view, () => t.id)}
-            />
-          )
-        })}
-      </Box>
-      <Box flexDirection="row" gap={1} flexShrink={0}>
-        {SCOPES.map(sc => (
+        return (
           <Button
-            key={`scope-${sc}`}
+            key={`tab-${t.id}`}
             plain
-            label={sc === picked ? `[${SCOPE_LABEL[sc]}]` : SCOPE_LABEL[sc]}
-            dimColor={sc !== picked}
-            onPress={() => void pickScope($, sc)}
+            label={t.id === active ? `[${label}]` : label}
+            dimColor={t.id !== active}
+            onPress={() => void update($, view, () => t.id)}
           />
-        ))}
-      </Box>
+        )
+      })}
     </Box>
   )
 }
 
-/** The terminal's pills: each a Button, the picked one in brackets. */
-const summaryPillsText = ($: $, els: Els, pane: string, sum: Summary, filter: Filter) => {
+/** The terminal scope switch: which sessions the Agents tab shows. */
+const scopeRowText = ($: $, els: Els, picked: Scope) => {
+  const { Box, Text, Button } = els
+
+  return (
+    <Box flexDirection="row" gap={1}>
+      <Text dimColor>Sessions:</Text>
+      {SCOPES.map(sc => (
+        <Button
+          key={`scope-${sc}`}
+          plain
+          label={sc === picked ? `[${SCOPE_LABEL[sc]}]` : SCOPE_LABEL[sc]}
+          dimColor={sc !== picked}
+          onPress={() => void pickScope($, sc)}
+        />
+      ))}
+    </Box>
+  )
+}
+
+/** The terminal's summary: percent, bar and count, then the pills, each a Button, the picked one in brackets. */
+const summaryText = ($: $, els: Els, pane: string, sum: Summary, filter: Filter, picked?: Scope) => {
   const { Box, Text, Button } = els
   const one = (f: Filter, dot: string | undefined, label: string) => (
     <Box key={`tf-${pane}-${f}`} flexDirection="row" gap={1}>
@@ -281,11 +345,21 @@ const summaryPillsText = ($: $, els: Els, pane: string, sum: Summary, filter: Fi
   )
 
   return (
-    <Box flexDirection="row" gap={2}>
-      {one('all', undefined, `All ${sum.total}`)}
-      {one('completed', C.green, `${sum.done} completed`)}
-      {one('in_progress', C.blue, `${sum.inProgress} in progress`)}
-      {one('pending', C.gray, `${sum.notStarted} not started`)}
+    <Box flexDirection="column" marginBottom={1}>
+      <Box flexDirection="row" gap={1} justifyContent="space-between">
+        <Box flexDirection="row" gap={1}>
+          <Text bold>{sum.percent}%</Text>
+          <Text color={TONE_KEY.done}>{bar(sum.percent / 100, 16)}</Text>
+          <Text dimColor>{ofDone(sum.done, sum.total)}</Text>
+        </Box>
+        {picked && scopeRowText($, els, picked)}
+      </Box>
+      <Box flexDirection="row" gap={2} flexWrap="wrap">
+        {one('all', undefined, `All ${sum.total}`)}
+        {one('completed', TONE_KEY.done, `${sum.done} done`)}
+        {one('in_progress', TONE_KEY.active, `${sum.inProgress} in progress`)}
+        {one('pending', TONE_KEY.pending, `${sum.notStarted} not started`)}
+      </Box>
     </Box>
   )
 }
@@ -300,8 +374,15 @@ const typed: Record<string, string> = {}
 /** A tab's search query. */
 const searchOf = async ($: $, pane: string) => (await read($, searches))[pane] ?? ''
 
-/** The search field under a tab's summary, the width of the board, and a ✕ that clears it. */
-const searchBox = ($: $, els: Els, pane: string, query: string) => {
+/** Empties a tab's search. */
+const clearSearch = ($: $, pane: string) => {
+  delete typed[pane]
+
+  return update($, searches, all => ({ ...all, [pane]: '' }))
+}
+
+/** The search field under a tab's summary, the width of the board, with a ✕ inside its trailing edge that clears it. */
+const searchBox = ($: $, els: Els, pane: string, query: string, placeholder: string, isDesktop: boolean) => {
   const { Box, Button } = els
   const Input = 'Input' in els ? els.Input : undefined
   if (!Input) return null
@@ -309,30 +390,28 @@ const searchBox = ($: $, els: Els, pane: string, query: string) => {
     typed[pane] = value
     void update($, searches, all => ({ ...all, [pane]: value }))
   }
+  const clear = query !== '' && (
+    <Button key={`search-clear-${pane}`} plain label="✕" onPress={() => void clearSearch($, pane)} />
+  )
 
   return (
     <Box key={`search-row-${pane}`} flexDirection="row" alignItems="center" gap={1} width="100%" marginBottom={1}>
       <Box flexGrow={1}>
         <Input
           key={`search-${pane}`}
-          placeholder="Search tasks, agents, steps, details…"
+          placeholder={placeholder}
           value={typed[pane] === query ? undefined : query}
           submitLabel="search"
           onInput={set}
           onSubmit={set}
         />
+        {isDesktop && clear && (
+          <Box position="absolute" right={1} top={0} bottom={0} flexDirection="row" alignItems="center">
+            {clear}
+          </Box>
+        )}
       </Box>
-      {query !== '' && (
-        <Button
-          key={`search-clear-${pane}`}
-          plain
-          label="✕"
-          onPress={() => {
-            delete typed[pane]
-            void update($, searches, all => ({ ...all, [pane]: '' }))
-          }}
-        />
-      )}
+      {!isDesktop && clear}
     </Box>
   )
 }
@@ -345,7 +424,7 @@ const markedText = (els: Els, text: string, words: readonly string[], props: Rec
     <Text {...props}>
       {runs(text, words).map((r, i) =>
         r.isHit ? (
-          <Text key={`hit-${i}`} bold color={INK.hit}>
+          <Text key={`hit-${i}`} bold color={HIT_KEY}>
             {r.text}
           </Text>
         ) : (
@@ -359,6 +438,111 @@ const markedText = (els: Els, text: string, words: readonly string[], props: Rec
 /** What the board says when the status filter and the search leave nothing. */
 const nothingText = (filter: Filter, query: string) =>
   query.trim() ? `Nothing matches “${query.trim()}”${filter === 'all' ? '' : ` among ${FILTER_ALT[filter]}`}.` : `Nothing ${FILTER_ALT[filter]}.`
+
+/** The empty result: a whole card saying so, with a line to press that clears the search and the filter. */
+const nothingCard = ($: $, els: Els, Art: SvgEl | undefined, lay: Layout, pane: string, text: string) => {
+  const { Box, Text, Button } = els
+  const clear = () => {
+    void clearSearch($, pane)
+    void update($, filters, all => ({ ...all, [pane]: 'all' as Filter }))
+  }
+  if (!Art) {
+    return (
+      <Box key={`nothing-${pane}`} flexDirection="column" alignItems="flex-start">
+        <Text dimColor>{text}</Text>
+        <Button key={`clear-${pane}`} plain label="Clear search and filters" onPress={clear} />
+      </Box>
+    )
+  }
+  const linkW = Math.ceil(textW('Clear search and filters', 13, 500) * 1.1) + 24
+
+  return (
+    <Box key={`nothing-${pane}`} flexDirection="column">
+      <Art source={nothingSvg(lay, text)} alt={`${text} Clear search and filters.`} />
+      {hitRow(els, lay.w, NOTHING_H, NOTHING_LINK_Y, NOTHING_H - NOTHING_LINK_Y - 6, [{ key: `clear-${pane}`, x: 4, w: linkW, onPress: clear }])}
+    </Box>
+  )
+}
+
+/** Flips one section, row or group; `open` is the state it lands in, so the turn plays only once the flip is drawn. */
+const toggleFold = async ($: $, key: string, open: boolean) => {
+  const at = await $.clock.now()
+  await update($, toggled, all => ({
+    ...Object.fromEntries(Object.entries(all).filter(([, t]) => at - t.at < MOTION_MS)),
+    [key]: { at, open },
+  }))
+  await update($, collapsed, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
+}
+
+/** Which way a chevron turns if it was toggled a moment ago; nothing once it has settled. */
+const motionFor = (flips: Record<string, { at: number; open: boolean }>, now: number) => (key: string, isOpen: boolean): Motion => {
+  const flip = flips[key]
+
+  return flip && flip.open === isOpen && now - flip.at < MOTION_MS ? (isOpen ? 'open' : 'close') : undefined
+}
+
+/** Picks a row or task for its details, or puts the details away when it is picked already. */
+const pickDetail = ($: $, key: string) => update($, selected, cur => (cur === key ? null : key))
+
+/** What a details box says: its title, its state and where, its text, and lines of facts. */
+type Detail = { title: string; status?: TaskStatus; context?: string; body?: string; lines: readonly string[] }
+
+/**
+ * The details of what was picked, right under its row: on a desktop drawn
+ * inside the card (its sides run on, and it closes the card when it ends it),
+ * with a click target over its Close; on the terminal a bordered box.
+ */
+const detailView = ($: $, els: Els, Art: SvgEl | undefined, lay: Layout, o: Detail, isLast: boolean) => {
+  if (!Art) return detailCard($, els, o)
+  const lines = o.lines.filter(Boolean)
+  const height = detailH(lay, { body: o.body, lines })
+  const close = detailClose(lay)
+
+  return (
+    <els.Box key="detail" flexDirection="column">
+      <Art
+        source={detailSvg(lay, { ...o, lines, isLast })}
+        alt={[o.title, o.status ? STATUS[o.status].label : '', o.context ?? '', o.body ?? '', ...lines].filter(Boolean).join('. ')}
+      />
+      {hitRow(els, lay.w, height, close.y, close.h, [
+        { key: 'detail-close', x: close.x, w: close.w, onPress: () => void update($, selected, () => null) },
+      ])}
+    </els.Box>
+  )
+}
+
+/** The terminal's details box. */
+const detailCard = ($: $, els: Els, o: Detail) => {
+  const { Box, Text, Button } = els
+
+  return (
+    <Box key="detail" flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+      <Box flexDirection="row" gap={1}>
+        <Box flexGrow={1} flexShrink={1}>
+          <Text bold wrap="truncate-end">
+            {o.title}
+          </Text>
+        </Box>
+        <Button key="detail-close" role="dismiss" label="Close" onPress={() => void update($, selected, () => null)} />
+      </Box>
+      {(o.status || o.context) && (
+        <Text wrap="truncate-end">
+          {o.status && <Text color={TONE_KEY[STATUS[o.status].tone]}>{STATUS[o.status].label}</Text>}
+          {o.context && <Text dimColor>{`${o.status ? ' · ' : ''}${o.context}`}</Text>}
+        </Text>
+      )}
+      {o.body && <Text wrap="wrap">{o.body}</Text>}
+      {o.lines.filter(Boolean).map((l, i) => (
+        <Text key={`detail-line-${i}`} dimColor wrap="wrap">
+          {l}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
+/** A terminal label cut to `max` characters with an ellipsis, so a long title never runs into its chip. */
+const clip = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, Math.max(1, max - 1)).trimEnd()}…`)
 
 type Loose = { tool: string; agentId?: string; [k: string]: unknown }
 
@@ -632,6 +816,21 @@ const closeOldTabs = async ($: $) => {
 /** The person's name for the greeting, from the plugin's options. */
 let userName = ''
 
+/** What the Agents tab says before there is anything on it. */
+const EMPTY_TITLE = 'No tasks yet'
+const EMPTY_BODY = 'The board fills in as soon as an agent writes a todo list or a subagent starts.'
+const HOUR = 60 * 60 * 1000
+
+/** A row's ring tone: green when all of it is done (or it finished with no list), blue while it works, gray otherwise. */
+const rowTone = (cat: Category): Tone => {
+  const c = countTasks(cat.tasks)
+  if (c.total > 0 && c.done === c.total) return 'done'
+  const section = sectionOf(cat)
+  if (section === 'done') return c.total === 0 ? 'done' : 'pending'
+
+  return section === 'working' ? 'active' : 'pending'
+}
+
 const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
   const els = $.ui.resolve(e)
   const { Box, Text, Button } = els
@@ -642,6 +841,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
   const b = await shownBoard($)
   const shut = new Set(await read($, collapsed))
   const pick = await read($, selected)
+  const picked = await read($, scope)
   const sum = summarize(b)
   const filter = (await read($, filters))[PANE] ?? 'all'
   const query = await searchOf($, PANE)
@@ -661,292 +861,276 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
   const sectionKey = (id: string) => (isFiltered ? `sf:${id}` : `s:${id}`)
   const foldKey = (id: string) => (isFiltered ? `of:${id}` : `o:${id}`)
   const isRowOpen = (id: string) => shut.has(foldKey(id)) !== isFiltered
+  /** Done starts closed (it only grows); the others start open. */
+  const sectionOpen = (id: SectionId) => (isFiltered || id !== 'done') !== shut.has(sectionKey(id))
+  const showsAll = (id: SectionId) => isFiltered || shut.has(`all:${id}`)
   const shownSections = grouped(b)
     .map(section => ({ ...section, categories: section.categories.filter(keeps) }))
     .filter(section => !isFiltered || section.categories.length > 0)
+  /** The rows a section lists: Done its latest few until "Show all". */
+  const listed = (id: SectionId, cats: readonly Category[]) => (id === 'done' && !showsAll(id) ? cats.slice(0, DONE_SHOWN) : cats)
+  const hasShowAll = (id: SectionId, cats: readonly Category[]) => id === 'done' && !isFiltered && cats.length > DONE_SHOWN
+  const showAllPress = (id: SectionId) => () =>
+    void update($, collapsed, list => (list.includes(`all:${id}`) ? list.filter(k => k !== `all:${id}`) : [...list, `all:${id}`]))
 
-  const flips = await read($, toggled)
-  /** Flips one section or agent; `open` is the state it lands in, so the turn plays only once the flip is drawn. */
-  const toggle = async (key: string, open: boolean) => {
-    const at = await $.clock.now()
-    await update($, toggled, all => ({
-      ...Object.fromEntries(Object.entries(all).filter(([, t]) => at - t.at < MOTION_MS)),
-      [key]: { at, open },
-    }))
-    await update($, collapsed, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
-  }
-  /** Which way a chevron turns if it was toggled a moment ago; nothing once it has settled. */
-  const motionOf = (key: string, isOpen: boolean): Motion => {
-    const flip = flips[key]
+  const motionOf = motionFor(await read($, toggled), now)
+  const toggle = (key: string, open: boolean) => void toggleFold($, key, open)
+  const isBlankBoard = isBlank(b) && !isFiltered
+  const working = grouped(b).find(s => s.id === 'working')?.categories.length ?? 0
+  const agents = grouped(b).find(s => s.id === 'working')?.categories.filter(c => c.kind === 'agent').length ?? 0
+  const sessions = working - agents
+  /** A status line, not the summary again: who is at work now. */
+  const subtitle =
+    working === 0
+      ? sum.total > 0 && sum.done === sum.total
+        ? 'All caught up'
+        : 'Nothing running right now'
+      : [
+          agents > 0 ? `${agents} ${agents === 1 ? 'agent' : 'agents'} working` : '',
+          sessions > 0 ? `${sessions} ${sessions === 1 ? 'session' : 'sessions'} busy` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ')
+  const heading = userName ? `Welcome back, ${userName}.` : 'Welcome back.'
 
-    return flip && flip.open === isOpen && now - flip.at < MOTION_MS ? (isOpen ? 'open' : 'close') : undefined
+  /** The details of a picked row, or of a picked task under it. */
+  const detailOf = (cat: Category, task?: Task): Detail => {
+    if (task) {
+      return {
+        title: task.title,
+        status: task.status,
+        context: `in ${cat.title}`,
+        body: task.description,
+        lines: [task.activeForm && task.activeForm !== task.title ? `Step: ${task.activeForm}` : '', taskTimes(task, now)],
+      }
+    }
+    const c = countTasks(cat.tasks)
+
+    return {
+      title: cat.title,
+      context: [cat.kind === 'agent' ? (cat.agentType ?? 'Agent') : 'Session', cat.note].filter(Boolean).join(' · '),
+      lines: [
+        `${c.total > 0 ? `${ofDone(c.done, c.total)} · ` : 'No todo list · '}started ${ago(cat.startedAt, now) || '—'} · last change ${ago(cat.updatedAt, now) || '—'}`,
+      ],
+    }
   }
 
   if (Svg) {
     const Art = Svg
-    const pickBy = (key: string) => update($, selected, cur => (cur === key ? null : key))
-    const sections = shownSections
-    const working = grouped(b).find(s => s.id === 'working')?.categories.length ?? 0
-    const subtitle =
-      working > 0
-        ? 'Working on things! I’ll ping you.'
-        : sum.total > 0 && sum.done === sum.total
-          ? 'All caught up.'
-          : 'Nothing running right now.'
+    const lay = layout(widthFor(paneColumns))
     const completions = b.categories.flatMap(c => c.tasks.flatMap(t => (t.completedAt ? [t.completedAt] : [])))
-
-    /** One drawn strip with native controls laid over the slots it leaves blank; unkeyed, so it is no hover scope. */
-    const strip = (key: string, source: string, alt: string, left?: JSX.Element, right?: JSX.Element, cx = 37) => (
-      <Box flexDirection="column">
-        <Art source={source} alt={alt} />
-        {left && (
-          <Box
-            position="absolute"
-            left={0}
-            top={0}
-            bottom={0}
-            width={hitWidth(cx)}
-            overflow="hidden"
-            flexDirection="row"
-            alignItems="center"
-            justifyContent="center"
-          >
-            <Box width={HIT_ROOM} flexShrink={0} flexDirection="row" alignItems="center" justifyContent="center">
-              {left}
-            </Box>
-          </Box>
-        )}
-        {right && (
-          <Box position="absolute" right={1} top={0} bottom={0} justifyContent="center">
-            {right}
-          </Box>
-        )}
-      </Box>
+    const header = (
+      <Art
+        source={headerSvg(lay, { heading, subtitle, completions, now, spanMs: HOUR, caption: 'last hour' })}
+        alt={`${heading} ${subtitle}`}
+      />
     )
-
-    const detail = (() => {
-      if (!pick) return null
-      const [catId, taskId] = pick.split('::')
-      const cat = b.categories.find(c => c.id === catId)
-      if (!cat) return null
-      const task = cat.tasks.find(t => t.id === taskId)
-      const c = countTasks(cat.tasks)
-      const end = task?.completedAt ?? (task?.status === 'in_progress' ? now : undefined)
+    if (isBlankBoard) {
+      const noteH = noticeH(lay, EMPTY_BODY, true)
 
       return (
-        <Box key="detail" flexDirection="column" borderStyle="round" borderColor={INK.border} paddingX={1} marginTop={1}>
-          <Box flexDirection="row" gap={1}>
-            <Box flexGrow={1}>
-              <Text bold color={INK.text} wrap="truncate-end">
-                {task ? task.title : cat.title}
-              </Text>
-            </Box>
-            <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
+        <Box flexDirection="column">
+          {header}
+          <Box marginY={1} flexDirection="column">
+            <Art source={noticeSvg(lay, EMPTY_TITLE, EMPTY_BODY, { scopes: SCOPES, picked })} alt={`${EMPTY_TITLE}. ${EMPTY_BODY} Sessions: ${SCOPE_LABEL[picked]}.`} />
+            {hitRow(els, lay.w, noteH, SCOPE_TOP, SCOPE_H, scopeSpots($, scopeLayout(lay, SCOPES)))}
           </Box>
-          {task ? (
-            <Box flexDirection="column">
-              <Text color={INK.sub}>
-                {task.status === 'completed' ? 'Done' : task.status === 'in_progress' ? 'In progress' : 'Not started'} · in{' '}
-                {cat.title}
-              </Text>
-              {task.activeForm && task.activeForm !== task.title && <Text color={INK.sub}>Step: {task.activeForm}</Text>}
-              {task.description && <Text wrap="wrap">{task.description}</Text>}
-              <Text color={INK.sub}>
-                Created {clock(task.createdAt)} · Started {clock(task.startedAt)} · Finished {clock(task.completedAt)}
-              </Text>
-              <Text color={INK.sub}>Time spent {duration(task.startedAt, end)}</Text>
-            </Box>
-          ) : (
-            <Box flexDirection="column">
-              <Text color={INK.sub}>{[cat.agentType, cat.note].filter(Boolean).join(' · ') || cat.kind}</Text>
-              <Text color={INK.sub}>
-                {c.done}/{c.total} tasks · started {clock(cat.startedAt)} · last change {clock(cat.updatedAt)}
-              </Text>
-              <Text color={INK.sub}>{currentStep(cat)}</Text>
-            </Box>
-          )}
         </Box>
       )
-    })()
+    }
+
+    const sections = shownSections.map(section => {
+      const key = sectionKey(section.id)
+      const isOpen = sectionOpen(section.id)
+      const prog = sectionProgress(section.categories)
+      const sectionMotion = motionOf(key, isOpen)
+      const cats = listed(section.id, section.categories)
+      const withShowAll = hasShowAll(section.id, section.categories)
+      const rows: JSX.Element[] = []
+      if (isOpen && section.categories.length === 0) {
+        rows.push(<Art key={`none-${section.id}`} source={emptyRowSvg(lay, section.empty, { order: sectionMotion ? 0 : undefined })} alt={section.empty} />)
+      }
+      if (isOpen) {
+        cats.forEach((cat, i) => {
+          const fold = foldKey(cat.id)
+          const isExpanded = isRowOpen(cat.id)
+          const tasksShown = shownTasks(cat)
+          const isLast = i === cats.length - 1 && !withShowAll
+          const foldMotion = motionOf(fold, isExpanded)
+          const c = rowItems(cat)
+          const step = currentStep(cat)
+          const live = cat.isLive && !cat.isFinished
+          rows.push(
+            strip(
+              els,
+              Art,
+              lay,
+              ROW_H,
+              rowSvg(lay, {
+                title: cat.title,
+                sub: rowSub(cat, step),
+                done: c.done,
+                total: c.total,
+                tone: rowTone(cat),
+                isLive: live,
+                isOpen: isExpanded,
+                isLast: isLast && pick !== `${cat.id}::`,
+                motion: foldMotion,
+                order: sectionMotion === 'open' ? i : undefined,
+                when: relTime(cat.updatedAt, now),
+                hasMore: true,
+                mark: words,
+              }),
+              `${cat.title}${live ? ' (live)' : ''}: ${step}. ${c.total > 0 ? ofDone(c.done, c.total) : 'No todo list'}. ${isExpanded ? 'Expanded' : 'Collapsed'}.`,
+              [
+                { key: `fold-${cat.id}`, x: 0, w: lay.more.x, onPress: () => toggle(fold, !isExpanded) },
+                { key: `more-${cat.id}`, x: lay.more.x, w: lay.w - lay.more.x, onPress: () => void pickDetail($, `${cat.id}::`) },
+              ],
+            ),
+          )
+          if (pick === `${cat.id}::`) rows.push(detailView($, els, Art, lay, detailOf(cat), isLast && !isExpanded))
+          if (!isExpanded) return
+          const isReveal = foldMotion === 'open'
+          if (tasksShown.length === 0) {
+            if (!isFiltered) {
+              rows.push(
+                <Art
+                  key={`none-${cat.id}`}
+                  source={emptyRowSvg(lay, 'No tasks yet.', { isLast, indent: lay.taskX, order: isReveal ? 0 : undefined })}
+                  alt="No tasks yet."
+                />,
+              )
+            }
+
+            return
+          }
+          tasksShown.forEach((task, j) => {
+            const tkey = `${cat.id}::${task.id}`
+            const when = task.status === 'completed' ? task.completedAt : (task.startedAt ?? task.createdAt)
+            rows.push(
+              strip(
+                els,
+                Art,
+                lay,
+                TASK_H,
+                taskRowSvg(lay, {
+                  title: task.title,
+                  status: task.status,
+                  isLast: isLast && j === tasksShown.length - 1 && pick !== tkey,
+                  isPicked: pick === tkey,
+                  order: isReveal ? j : undefined,
+                  when: relTime(when, now),
+                  mark: words,
+                }),
+                `${task.title}: ${STATUS[task.status].label}`,
+                [{ key: `task-${tkey}`, x: 0, w: lay.w, onPress: () => void pickDetail($, tkey) }],
+              ),
+            )
+            if (pick === tkey) rows.push(detailView($, els, Art, lay, detailOf(cat, task), isLast && j === tasksShown.length - 1))
+          })
+        })
+        if (withShowAll) {
+          const label = showsAll(section.id) ? 'Show fewer' : `Show all ${section.categories.length}`
+          rows.push(
+            strip(els, Art, lay, EMPTY_H, emptyRowSvg(lay, label, { isLast: true, link: true }), label, [
+              { key: `show-all-${section.id}`, x: 0, w: lay.w, onPress: showAllPress(section.id) },
+            ]),
+          )
+        }
+      }
+
+      return (
+        <Box key={`sec-${section.id}`} flexDirection="column" marginBottom={1}>
+          {strip(
+            els,
+            Art,
+            lay,
+            SECTION_H,
+            sectionHeadSvg(lay, {
+              tone: SECTION_TONE[section.id],
+              title: section.title,
+              done: prog.done,
+              total: prog.total,
+              isOpen,
+              motion: sectionMotion,
+              mark: words,
+            }),
+            `${section.title}: ${section.categories.length} ${section.categories.length === 1 ? 'row' : 'rows'}, ${ofDone(prog.done, prog.total)}. ${isOpen ? 'Expanded' : 'Collapsed'}.`,
+            [{ key: `head-${section.id}`, x: 0, w: lay.w, onPress: () => toggle(key, !isOpen) }],
+          )}
+          {rows}
+        </Box>
+      )
+    })
 
     return (
       <Box flexDirection="column">
-        <Art source={headerSvg(userName, subtitle, completions, now)} alt={`Welcome back${userName ? `, ${userName}` : ''}. ${subtitle}`} />
-        {summaryCard($, els, Art, PANE, sum, filter)}
-        {searchBox($, els, PANE, query)}
-        {detail}
-        {isFiltered && sections.length === 0 && <Art source={emptyRowSvg(nothing)} alt={nothing} />}
-        {sections.map(section => {
-          const key = sectionKey(section.id)
-          const isOpen = !shut.has(key)
-          const count = section.categories.length
-          const sectionMotion = motionOf(key, isOpen)
-
-          return (
-            <Box key={`sec-${section.id}`} flexDirection="column" marginBottom={1}>
-              {strip(
-                `head-row-${section.id}`,
-                sectionHeadSvg(section.id, section.title, count, isOpen, sectionMotion, sectionProgress(section.categories), words),
-                `${section.title}, ${count}, ${isOpen ? 'expanded' : 'collapsed'}`,
-                <Button key={`head-${section.id}`} plain label={hit(48 / 925)} onPress={() => toggle(key, !isOpen)} />,
-                undefined,
-                24,
-              )}
-              {isOpen && count === 0 && (
-                <Art source={emptyRowSvg(section.empty, { order: sectionMotion ? 0 : undefined })} alt={section.empty} />
-              )}
-              {isOpen &&
-                section.categories.flatMap((cat, i) => {
-                  const fold = foldKey(cat.id)
-                  const isExpanded = isRowOpen(cat.id)
-                  const tasksShown = shownTasks(cat)
-                  const isLast = i === count - 1
-                  const foldMotion = motionOf(fold, isExpanded)
-                  const row = strip(
-                    `agent-${cat.id}`,
-                    agentRowSvg(cat, now, {
-                      isLast,
-                      isOpen: isExpanded,
-                      motion: foldMotion,
-                      order: sectionMotion === 'open' ? i : undefined,
-                      mark: words,
-                    }),
-                    `${cat.title}: ${currentStep(cat)}, ${isExpanded ? 'expanded' : 'collapsed'}`,
-                    <Button key={`fold-${cat.id}`} plain label={hit(74 / 925)} onPress={() => toggle(fold, !isExpanded)} />,
-                    <Button key={`more-${cat.id}`} plain label="⋯" onPress={() => pickBy(`${cat.id}::`)} />,
-                  )
-                  if (!isExpanded) return [row]
-                  const reveal = foldMotion === 'open'
-                  if (tasksShown.length === 0) {
-                    if (isFiltered) return [row]
-
-                    return [
-                      row,
-                      <Art
-                        key={`none-${cat.id}`}
-                        source={emptyRowSvg('No tasks yet.', { isLast, indent: 121, order: reveal ? 0 : undefined })}
-                        alt="No tasks yet."
-                      />,
-                    ]
-                  }
-                  const tasks = tasksShown.map((task, j) =>
-                    strip(
-                      `row-${cat.id}::${task.id}`,
-                      taskRowSvg(task, now, {
-                        isLast: isLast && j === tasksShown.length - 1,
-                        isPicked: pick === `${cat.id}::${task.id}`,
-                        order: reveal ? j : undefined,
-                        mark: words,
-                      }),
-                      `${task.title}: ${task.status}`,
-                      undefined,
-                      <Button key={`task-${cat.id}::${task.id}`} plain label="⋯" onPress={() => pickBy(`${cat.id}::${task.id}`)} />,
-                    ),
-                  )
-
-                  return [row, ...tasks]
-                })}
-            </Box>
-          )
-        })}
+        {header}
+        {summaryCard($, els, Art, lay, PANE, sum, filter, picked)}
+        {searchBox($, els, PANE, query, 'Search tasks, agents, steps…', true)}
+        {isFiltered && shownSections.length === 0 ? nothingCard($, els, Art, lay, PANE, nothing) : sections}
       </Box>
     )
   }
 
-  const ring = (fraction: number, color: string) => <Text color={color}>{ringGlyph(fraction)}</Text>
-
-  const chip = (task: Task) => {
-    const [label, color] =
-      task.status === 'completed'
-        ? ['Done', C.green]
-        : task.status === 'in_progress'
-          ? ['In progress', C.blue]
-          : ['Not started', C.gray]
-
-    return <Text color={color}>{label}</Text>
-  }
-
-  const glyph = (task: Task) =>
-    task.status === 'completed' ? (
-      <Text color={C.green}>✓</Text>
-    ) : task.status === 'in_progress' ? (
-      <Text color={C.blue}>◐</Text>
-    ) : (
-      <Text color={C.gray}>○</Text>
-    )
-
-  const summary = (
-    <Box flexDirection="column" marginBottom={1}>
-      <Box flexDirection="row" gap={1}>
-        <Text bold>{sum.percent}%</Text>
-        <Text color={C.green}>{bar(sum.percent / 100, 16)}</Text>
-        <Text dimColor>
-          {sum.done}/{sum.total} {sum.unit}
-        </Text>
-      </Box>
-      {summaryPillsText($, els, PANE, sum, filter)}
-      {searchBox($, els, PANE, query)}
-    </Box>
-  )
+  const cols = paneColumns
+  const showChips = cols >= 60
 
   const taskRow = (cat: Category, task: Task) => {
     const key = `${cat.id}::${task.id}`
-    const isPicked = pick === key
+    const st = STATUS[task.status]
     const when = task.status === 'completed' ? task.completedAt : (task.startedAt ?? task.createdAt)
+    const room = cols - 4 - 2 - (showChips ? st.label.length + 1 : 0) - 5 - 1
 
     return (
-      <Box key={`row-${key}`} flexDirection="row" gap={1} paddingLeft={4}>
-        {glyph(task)}
-        <Box flexGrow={1}>
-          <Button
-            key={`task-${key}`}
-            plain
-            label={task.title}
-            dimColor={task.status === 'completed' && !isPicked}
-            onPress={() => update($, selected, cur => (cur === key ? null : key))}
-          />
+      <Box key={`row-${key}`} flexDirection="column">
+        <Box flexDirection="row" gap={1} paddingLeft={4}>
+          <Text color={TONE_KEY[st.tone]}>{st.glyph}</Text>
+          <Box flexGrow={1} flexShrink={1}>
+            <Button
+              key={`task-${key}`}
+              plain
+              label={clip(task.title, room)}
+              dimColor={task.status === 'completed' && pick !== key}
+              onPress={() => void pickDetail($, key)}
+            />
+          </Box>
+          {showChips && <Text color={TONE_KEY[st.tone]}>{st.label}</Text>}
+          <Text dimColor>{(relTime(when, now) || '—').padStart(4)}</Text>
         </Box>
-        {chip(task)}
-        <Text dimColor>{relTime(when, now)}</Text>
+        {pick === key && detailCard($, els, detailOf(cat, task))}
       </Box>
     )
   }
 
   const agentRow = (cat: Category) => {
-    const c = countTasks(cat.tasks)
+    const c = rowItems(cat)
     const key = foldKey(cat.id)
     const isOpen = isRowOpen(cat.id)
     const live = cat.isLive && !cat.isFinished
-    const color = c.total > 0 && c.done === c.total ? C.green : C.blue
+    const tone = rowTone(cat)
 
     return (
       <Box key={`agent-${cat.id}`} flexDirection="column">
         <Box flexDirection="row" gap={1}>
           <Button key={`fold-${cat.id}`} plain label={isOpen ? '▾' : '▸'} onPress={() => toggle(key, !isOpen)} />
-          <Text color={rowCheck(cat) === 'empty' ? INK.box : INK.check}>
-            {rowCheck(cat) === 'done' ? '☑' : rowCheck(cat) === 'mixed' ? '⊟' : '☐'}
-          </Text>
-          <Box flexGrow={1}>
+          <Text color={TONE_KEY[tone]}>{ringGlyph(c.total === 0 ? 0 : c.done / c.total)}</Text>
+          <Box flexGrow={1} flexShrink={1}>
             <Text wrap="truncate-end">
               {markedText(els, cat.title, words)}
-              {live ? <Text color={C.green}> ●</Text> : ''}
+              {live ? <Text color={TONE_KEY.active}> ●</Text> : ''}
             </Text>
           </Box>
-          <Box flexDirection="row" gap={1}>
-            {ring(c.total === 0 ? 0 : c.done / c.total, color)}
-            <Text>
-              {c.done}/{c.total}
-            </Text>
-            <Text dimColor>{relTime(cat.updatedAt, now) || '—'}</Text>
-            <Button key={`more-${cat.id}`} plain label="⋯" onPress={() => update($, selected, cur => (cur === `${cat.id}::` ? null : `${cat.id}::`))} />
-          </Box>
+          <Text dimColor={c.total === 0}>{c.total === 0 ? '—' : `${c.done}/${c.total}`}</Text>
+          <Text dimColor>{(relTime(cat.updatedAt, now) || '—').padStart(4)}</Text>
+          <Button key={`more-${cat.id}`} plain label="⋯" onPress={() => void pickDetail($, `${cat.id}::`)} />
         </Box>
-        <Box paddingLeft={6}>
+        <Box paddingLeft={4}>
           <Text dimColor wrap="truncate-end">
-            {cat.agentType && cat.kind === 'agent' ? `${cat.agentType} · ` : ''}
-            {currentStep(cat)}
+            {rowSub(cat, currentStep(cat))}
           </Text>
         </Box>
+        {pick === `${cat.id}::` && detailCard($, els, detailOf(cat))}
         {isOpen && shownTasks(cat).map(task => taskRow(cat, task))}
       </Box>
     )
@@ -954,104 +1138,64 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
 
   const sections = shownSections.map(section => {
     const key = sectionKey(section.id)
-    const isOpen = !shut.has(key)
+    const isOpen = sectionOpen(section.id)
+    const prog = sectionProgress(section.categories)
+    const cats = listed(section.id, section.categories)
 
     return (
       <Box key={`sec-${section.id}`} flexDirection="column" marginBottom={1}>
         <Box flexDirection="row" gap={1}>
           <Button key={`head-${section.id}`} plain label={isOpen ? '▾' : '▸'} onPress={() => toggle(key, !isOpen)} />
-          <Text color={SECTION_DOT[section.id]}>●</Text>
+          <Text color={TONE_KEY[SECTION_TONE[section.id]]}>●</Text>
           {markedText(els, section.title, words, { bold: true })}
-          <Text dimColor>{section.categories.length}</Text>
+          {prog.total > 0 && <Text dimColor>{`${prog.done}/${prog.total}`}</Text>}
         </Box>
         {isOpen && section.categories.length === 0 && (
           <Box paddingLeft={2}>
             <Text dimColor>{section.empty}</Text>
           </Box>
         )}
-        {isOpen && section.categories.map(agentRow)}
+        {isOpen && cats.map(agentRow)}
+        {isOpen && hasShowAll(section.id, section.categories) && (
+          <Box paddingLeft={2}>
+            <Button
+              key={`show-all-${section.id}`}
+              plain
+              label={showsAll(section.id) ? 'Show fewer' : `Show all ${section.categories.length}`}
+              onPress={showAllPress(section.id)}
+            />
+          </Box>
+        )}
       </Box>
     )
   })
 
-  const detail = (() => {
-    if (!pick) return null
-    const [catId, taskId] = pick.split('::')
-    const cat = b.categories.find(c => c.id === catId)
-    const task = cat?.tasks.find(t => t.id === taskId)
-    if (!cat) return null
-    if (!task) {
-      const c = countTasks(cat.tasks)
-
-      return (
-        <Box key="detail" flexDirection="column" borderStyle="round" borderColor={C.gray} paddingX={1}>
-          <Box flexDirection="row" gap={1}>
-            <Box flexGrow={1}>
-              <Text bold wrap="truncate-end">
-                {cat.title}
-              </Text>
-            </Box>
-            <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
-          </Box>
-          <Text dimColor>{[cat.agentType, cat.note].filter(Boolean).join(' · ') || cat.kind}</Text>
-          <Text dimColor>
-            {c.done}/{c.total} tasks · started {clock(cat.startedAt)} · last change {clock(cat.updatedAt)}
-          </Text>
-        </Box>
-      )
-    }
-    const end = task.completedAt ?? (task.status === 'in_progress' ? now : undefined)
-
+  if (isBlankBoard) {
     return (
-      <Box
-        key="detail"
-        flexDirection="column"
-        borderStyle="round"
-        borderColor={C.gray}
-        paddingX={1}
-      >
-        <Box flexDirection="row" gap={1}>
-          <Box flexGrow={1}>
-            <Text bold wrap="truncate-end">
-              {task.title}
-            </Text>
-          </Box>
-          <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
-        </Box>
-        <Box flexDirection="row" gap={1}>
-          {chip(task)}
-          <Text dimColor>in {cat.title}</Text>
-        </Box>
-        {task.activeForm && task.activeForm !== task.title && <Text dimColor>Step: {task.activeForm}</Text>}
-        {task.description && <Text wrap="wrap">{task.description}</Text>}
-        <Text dimColor>
-          Created {clock(task.createdAt)} · Started {clock(task.startedAt)} · Finished {clock(task.completedAt)}
+      <Box flexDirection="column">
+        <Text bold>{EMPTY_TITLE}</Text>
+        <Text dimColor wrap="wrap">
+          {EMPTY_BODY}
         </Text>
-        <Text dimColor>Time spent {duration(task.startedAt, end)}</Text>
+        <Box marginTop={1}>{scopeRowText($, els, picked)}</Box>
       </Box>
     )
-  })()
+  }
 
   return (
     <Box flexDirection="column">
-      {summary}
-      {b.categories.length === 0 ? (
-        <Text dimColor>No agents have a todo list yet. They show up here as soon as one does.</Text>
-      ) : isFiltered && sections.length === 0 ? (
-        <Text dimColor>{nothing}</Text>
-      ) : (
-        sections
-      )}
-      {detail}
+      {summaryText($, els, PANE, sum, filter, picked)}
+      {searchBox($, els, PANE, query, 'Search tasks, agents, steps…', false)}
+      {isFiltered && shownSections.length === 0 ? nothingCard($, els, undefined, layout(widthFor(cols)), PANE, nothing) : sections}
     </Box>
   )
 }
 
-/** A project tab: one checklist file in the board's design. */
 /** A checklist line as words: its name, its status, and each part's. */
 const itemAlt = (item: DocItem) =>
-  `${item.title}: ${item.status}${item.facets ? `; ${item.facets.map(f => `${f.key} ${f.isDone ? 'done' : 'not done'}`).join(', ')}` : ''}`
+  `${item.title}: ${STATUS[item.status].label}${item.facets ? `; ${item.facets.map(f => `${f.key} ${f.isDone ? 'done' : 'not done'}`).join(', ')}` : ''}`
 
+/** A project tab: one checklist file in the board's design. */
 const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
   const raw = (await read($, docs))[pane]
   if (!raw) return undefined
@@ -1063,13 +1207,12 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
   await read($, tick)
   const now = await $.clock.now()
   const shut = new Set(await read($, collapsed))
-  const flips = await read($, toggled)
   const pick = await read($, selected)
   const history = (await read($, docHistory))[pane] ?? []
 
   const all = doc.sections.flatMap(itemsOf)
   const asTask = itemAsTask(doc.updatedAt)
-  const sum = { ...countTasks(all.map(asTask)), unit: 'tasks' as const }
+  const sum = { ...countTasks(all.map(asTask)), unit: 'items' as const }
   const stateOf = (items: readonly DocItem[], isLive = false): SectionId => {
     const c = countTasks(items.map(asTask))
     if (c.total > 0 && c.done === c.total) return 'done'
@@ -1102,85 +1245,66 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
     }))
     .filter(v => !isFiltered || v.items.length > 0 || v.groups.length > 0)
   const nothing = nothingText(filter, query)
-  const toggle = async (key: string, open: boolean) => {
-    const at = await $.clock.now()
-    await update($, toggled, list => ({
-      ...Object.fromEntries(Object.entries(list).filter(([, t]) => at - t.at < MOTION_MS)),
-      [key]: { at, open },
-    }))
-    await update($, collapsed, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
-  }
-  const motionOf = (key: string, isOpen: boolean): Motion => {
-    const flip = flips[key]
-
-    return flip && flip.open === isOpen && now - flip.at < MOTION_MS ? (isOpen ? 'open' : 'close') : undefined
-  }
-  const pickBy = (key: string) => update($, selected, cur => (cur === key ? null : key))
-  const picked = pick?.startsWith(`${pane}::`) ? all.find(i => `${pane}::${i.id}` === pick) : undefined
-  const subtitle = doc.error ?? `${doc.file} · updated ${relTime(doc.updatedAt, now) || 'just now'}`
+  const motionOf = motionFor(await read($, toggled), now)
+  const toggle = (key: string, open: boolean) => void toggleFold($, key, open)
+  const subtitle = doc.error ?? `${doc.file} · updated ${ago(doc.updatedAt, now) || 'just now'}`
   const steps = history.flatMap(([t, d], i) => {
     const prev = history[i - 1]?.[1] ?? d
 
     return d > prev ? Array.from({ length: Math.min(d - prev, 20) }, () => t) : []
   })
-
-  const detail = picked && (
-    <Box key="detail" flexDirection="column" borderStyle="round" borderColor={INK.border} paddingX={1} marginBottom={1}>
-      <Box flexDirection="row" gap={1}>
-        <Box flexGrow={1}>
-          <Text bold wrap="truncate-end">
-            {picked.title}
-          </Text>
-        </Box>
-        <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
-      </Box>
-      <Text color={INK.sub}>
-        {picked.status === 'completed' ? 'Done' : picked.status === 'in_progress' ? 'In progress' : 'Not started'}
-      </Text>
-      {picked.detail !== picked.title && <Text wrap="wrap">{picked.detail}</Text>}
-    </Box>
-  )
+  const itemKey = (item: DocItem) => `${pane}::${item.id}`
+  /** The details of a picked line, under it. */
+  const itemDetail = (item: DocItem, where: string): Detail => ({
+    title: item.title,
+    status: item.status,
+    context: `in ${where}`,
+    body: item.facets ? undefined : itemNote(item),
+    lines: [
+      item.facets ? `Parts: ${item.facets.map(f => f.label).join(', ')}` : '',
+      item.liveBy ? `In progress: matched to running work “${item.liveBy}”` : '',
+    ],
+  })
+  /** Each section's part columns, as one list, and the most lines any of its lists has (what sizes a count). */
+  const columnsOfSection = (s: (typeof doc.sections)[number]) => ({
+    keys: sectionColumns(s),
+    widest: Math.max(1, s.items.length, ...s.groups.map(g => g.items.length)),
+  })
 
   if (Svg) {
     const Art = Svg
-    const strip = (source: string, alt: string, left?: JSX.Element, right?: JSX.Element, cx = 37) => (
-      <Box flexDirection="column">
-        <Art source={source} alt={alt} />
-        {left && (
-          <Box
-            position="absolute"
-            left={0}
-            top={0}
-            bottom={0}
-            width={hitWidth(cx)}
-            overflow="hidden"
-            flexDirection="row"
-            alignItems="center"
-            justifyContent="center"
-          >
-            <Box width={HIT_ROOM} flexShrink={0} flexDirection="row" alignItems="center" justifyContent="center">
-              {left}
-            </Box>
-          </Box>
-        )}
-        {right && (
-          <Box position="absolute" right={1} top={0} bottom={0} justifyContent="center">
-            {right}
-          </Box>
-        )}
-      </Box>
-    )
-    const more = (id: string) => (
-      <Button key={`item-${pane}::${id}`} plain label="⋯" onPress={() => pickBy(`${pane}::${id}`)} />
-    )
+    const lay = layout(widthFor(paneColumns), { hasTime: false })
+    const itemStrip = (item: DocItem, o: { isLast: boolean; flat?: boolean; order?: number; plan: ColumnPlan }) =>
+      strip(
+        els,
+        Art,
+        lay,
+        TASK_H,
+        taskRowSvg(lay, {
+          title: item.title,
+          status: item.status,
+          isLast: o.isLast && pick !== itemKey(item),
+          isPicked: pick === itemKey(item),
+          flat: o.flat,
+          order: o.order,
+          isLive: item.liveBy !== undefined,
+          mark: words,
+          plan: o.plan,
+          facets: item.facets,
+        }),
+        itemAlt(item),
+        [{ key: `item-${itemKey(item)}`, x: 0, w: lay.w, onPress: () => void pickDetail($, itemKey(item)) }],
+      )
 
     return (
       <Box flexDirection="column">
-        <Art source={headerSvg('', subtitle, steps, now, doc.title, DOC_SPAN)} alt={`${doc.title}. ${subtitle}`} />
-        {summaryCard($, els, Art, pane, sum, filter)}
-        {searchBox($, els, pane, query)}
-        {detail}
-        {isFiltered && shown.length === 0 && <Art source={emptyRowSvg(nothing)} alt={nothing} />}
+        <Art
+          source={headerSvg(lay, { heading: doc.title, subtitle, completions: steps, now, spanMs: DOC_SPAN, caption: 'last 7 days' })}
+          alt={`${doc.title}. ${subtitle}`}
+        />
+        {summaryCard($, els, Art, lay, pane, sum, filter)}
+        {searchBox($, els, pane, query, 'Search items and details…', true)}
+        {isFiltered && shown.length === 0 && nothingCard($, els, Art, lay, pane, nothing)}
         {shown.map(({ section, items: ownItems, groups }) => {
           const items = itemsOf(section)
           const state = stateOf(items, section.isLive)
@@ -1188,27 +1312,22 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
           const isOpen = sectionOpen(section.id, state)
           const sectionMotion = motionOf(key, isOpen)
           const c = countTasks(items.map(asTask))
+          const { keys, widest } = columnsOfSection(section)
+          const plan = planColumns(lay, keys, widest)
+          const ownHasParts = section.items.some(i => i.facets)
           const rows: JSX.Element[] = []
           if (isOpen) {
-            ownItems.forEach((item, j) =>
+            ownItems.forEach((item, j) => {
               rows.push(
-                strip(
-                  taskRowSvg(asTask(item), now, {
-                    isLast: groups.length === 0 && j === ownItems.length - 1,
-                    isPicked: pick === `${pane}::${item.id}`,
-                    order: sectionMotion === 'open' ? j : undefined,
-                    when: '',
-                    flat: true,
-                    mark: words,
-                    columns: columnsOf(section.items),
-                    facets: item.facets,
-                  }),
-                  itemAlt(item),
-                  undefined,
-                  more(item.id),
-                ),
-              ),
-            )
+                itemStrip(item, {
+                  isLast: groups.length === 0 && j === ownItems.length - 1,
+                  flat: true,
+                  order: sectionMotion === 'open' ? j : undefined,
+                  plan,
+                }),
+              )
+              if (pick === itemKey(item)) rows.push(detailView($, els, Art, lay, itemDetail(item, section.title), groups.length === 0 && j === ownItems.length - 1))
+            })
             groups.forEach(({ group, items: groupItems }, j) => {
               const gkey = groupKey(group.id)
               const gOpen = groupOpen(group.id)
@@ -1216,55 +1335,69 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
               const isLast = j === groups.length - 1
               const cat = groupAsCategory(group.id, group.title, group.items, doc.updatedAt, group.isLive)
               const gc = countTasks(cat.tasks)
+              const counts = countsFor(group.items, keys)
+              const countWords = counts
+                .filter(col => col.total > 0)
+                .map(col => `${col.key} ${col.done}/${col.total}`)
+                .join(' · ')
               rows.push(
                 strip(
-                  agentRowSvg(cat, now, {
-                    isLast,
+                  els,
+                  Art,
+                  lay,
+                  ROW_H,
+                  rowSvg(lay, {
+                    title: group.title,
+                    sub: plan.mode === 'compact' && countWords ? countWords : nextStep(cat),
+                    done: gc.done,
+                    total: gc.total,
+                    tone: toneOf(gc.done, gc.total, cat.isLive),
+                    isLive: cat.isLive,
                     isOpen: gOpen,
+                    isLast,
                     motion: gMotion,
                     order: sectionMotion === 'open' ? ownItems.length + j : undefined,
-                    when: `${gc.percent}%`,
                     mark: words,
-                    columns: columnCounts(group.items),
+                    plan,
+                    columns: counts,
                   }),
-                  `${group.title}: ${gc.done}/${gc.total}${columnCounts(group.items)
-                    .map(col => `, ${col.key} ${col.done}/${col.total}`)
-                    .join('')}, ${gOpen ? 'expanded' : 'collapsed'}`,
-                  <Button key={`group-${pane}:${group.id}`} plain label={hit(74 / 925)} onPress={() => toggle(gkey, !gOpen)} />,
+                  `${group.title}: ${ofDone(gc.done, gc.total)}${counts
+                    .filter(col => col.total > 0)
+                    .map(col => `, ${col.key} ${col.done} of ${col.total}`)
+                    .join('')}. ${gOpen ? 'Expanded' : 'Collapsed'}.`,
+                  [{ key: `group-${pane}:${group.id}`, x: 0, w: lay.w, onPress: () => toggle(gkey, !gOpen) }],
                 ),
               )
               if (gOpen) {
-                groupItems.forEach((item, k) =>
-                  rows.push(
-                    strip(
-                      taskRowSvg(asTask(item), now, {
-                        isLast: isLast && k === groupItems.length - 1,
-                        isPicked: pick === `${pane}::${item.id}`,
-                        order: gMotion === 'open' ? k : undefined,
-                        when: '',
-                        mark: words,
-                        columns: columnsOf(group.items),
-                        facets: item.facets,
-                      }),
-                      itemAlt(item),
-                      undefined,
-                      more(item.id),
-                    ),
-                  ),
-                )
+                groupItems.forEach((item, k) => {
+                  rows.push(itemStrip(item, { isLast: isLast && k === groupItems.length - 1, order: gMotion === 'open' ? k : undefined, plan }))
+                  if (pick === itemKey(item)) rows.push(detailView($, els, Art, lay, itemDetail(item, group.title), isLast && k === groupItems.length - 1))
+                })
               }
             })
-            if (items.length === 0) rows.push(<Art source={emptyRowSvg('No checklist items.')} alt="No checklist items." />)
+            if (items.length === 0) rows.push(<Art key={`none-${section.id}`} source={emptyRowSvg(lay, 'No checklist items.')} alt="No checklist items." />)
           }
 
           return (
             <Box key={`doc-${pane}-${section.id}`} flexDirection="column" marginBottom={1}>
               {strip(
-                sectionHeadSvg(state, section.title, `${c.done}/${c.total}`, isOpen, sectionMotion, c, words),
-                `${section.title}, ${c.done} of ${c.total} done, ${isOpen ? 'expanded' : 'collapsed'}`,
-                <Button key={`head-${pane}:${section.id}`} plain label={hit(48 / 925)} onPress={() => toggle(key, !isOpen)} />,
-                undefined,
-                24,
+                els,
+                Art,
+                lay,
+                SECTION_H,
+                sectionHeadSvg(lay, {
+                  tone: SECTION_TONE[state],
+                  title: section.title,
+                  done: c.done,
+                  total: c.total,
+                  isOpen,
+                  motion: sectionMotion,
+                  mark: words,
+                  plan: ownHasParts ? plan : undefined,
+                  columns: ownHasParts ? countsFor(section.items, keys) : undefined,
+                }),
+                `${section.title}: ${ofDone(c.done, c.total)}. ${isOpen ? 'Expanded' : 'Collapsed'}.`,
+                [{ key: `head-${pane}:${section.id}`, x: 0, w: lay.w, onPress: () => toggle(key, !isOpen) }],
               )}
               {rows}
             </Box>
@@ -1274,107 +1407,121 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
     )
   }
 
-  const glyph = (status: string) =>
-    status === 'completed' ? (
-      <Text color={C.green}>☑</Text>
-    ) : status === 'in_progress' ? (
-      <Text color={C.blue}>◐</Text>
-    ) : (
-      <Text color={C.gray}>☐</Text>
-    )
-  const itemRow = (item: DocItem, indent: number) => (
-    <Box key={`row-${pane}-${item.id}`} flexDirection="row" gap={1} paddingLeft={indent}>
-      {glyph(item.status)}
-      <Box flexGrow={1}>
-        <Button
-          key={`item-${pane}::${item.id}`}
-          plain
-          label={item.title}
-          dimColor={item.status === 'completed'}
-          onPress={() => pickBy(`${pane}::${item.id}`)}
-        />
+  const cols = paneColumns
+  /** The terminal's part columns for a section: each as wide as its widest count, in the section's order; none when they leave a name too little room. */
+  const termColumns = (section: (typeof doc.sections)[number]) => {
+    const { keys } = columnsOfSection(section)
+    const lists = [section.items, ...section.groups.map(g => g.items)]
+    const ws = keys.map(k => Math.max(...lists.map(l => countsFor(l, [k]).map(col => `${k} ${col.done}/${col.total}`.length)[0] ?? 0)) + 1)
+    const total = ws.reduce((a, b) => a + b, 0) + ws.length
+
+    return total > cols - 28 ? [] : keys.map((key, i) => ({ key, w: ws[i]! }))
+  }
+  const itemRow = (item: DocItem, indent: number, columns: readonly { key: string; w: number }[], where: string, tail: number) => {
+    const st = STATUS[item.status]
+    const room = cols - indent - 2 - columns.reduce((a, c) => a + c.w + 1, 0) - (columns.length > 0 ? tail + 1 : 0) - 1
+
+    return (
+      <Box key={`row-${pane}-${item.id}`} flexDirection="column">
+        <Box flexDirection="row" gap={1} paddingLeft={indent}>
+          <Text color={TONE_KEY[st.tone]}>{st.glyph}</Text>
+          <Box flexGrow={1} flexShrink={1}>
+            <Button
+              key={`item-${itemKey(item)}`}
+              plain
+              label={`${clip(item.title, room - (item.liveBy ? 2 : 0))}${item.liveBy ? ' ●' : ''}`}
+              dimColor={item.status === 'completed' && pick !== itemKey(item)}
+              onPress={() => void pickDetail($, itemKey(item))}
+            />
+          </Box>
+          {columns.map(col => {
+            const f = item.facets?.find(x => x.key === col.key)
+
+            return (
+              <Box key={`facet-${pane}-${item.id}-${col.key}`} width={col.w}>
+                <Text color={f ? TONE_KEY[f.isDone ? 'done' : 'pending'] : undefined} dimColor={!f}>
+                  {f ? (f.isDone ? '☑' : '☐') : '–'}
+                </Text>
+              </Box>
+            )
+          })}
+          {columns.length > 0 && <Box width={tail} />}
+        </Box>
+        {pick === itemKey(item) && detailCard($, els, itemDetail(item, where))}
       </Box>
-      {item.facets?.map(f => (
-        <Text key={`facet-${pane}-${item.id}-${f.key}`} color={f.isDone ? C.green : C.gray}>
-          {f.isDone ? '●' : '○'} {f.key}
-        </Text>
-      ))}
-    </Box>
-  )
+    )
+  }
 
   return (
     <Box flexDirection="column">
       <Text bold>{doc.title}</Text>
       <Text dimColor>{subtitle}</Text>
-      <Box flexDirection="row" gap={1} marginTop={1}>
-        <Text bold>{sum.percent}%</Text>
-        <Text color={C.green}>{bar(sum.percent / 100, 16)}</Text>
-        <Text dimColor>
-          {sum.done}/{sum.total} tasks
-        </Text>
-      </Box>
-      <Box marginBottom={1}>{summaryPillsText($, els, pane, sum, filter)}</Box>
-      {searchBox($, els, pane, query)}
-      {isFiltered && shown.length === 0 && <Text dimColor>{nothing}</Text>}
+      <Box marginTop={1}>{summaryText($, els, pane, sum, filter)}</Box>
+      {searchBox($, els, pane, query, 'Search items and details…', false)}
+      {isFiltered && shown.length === 0 && nothingCard($, els, undefined, layout(widthFor(cols)), pane, nothing)}
       {shown.map(({ section, items: ownItems, groups }) => {
         const items = itemsOf(section)
         const state = stateOf(items, section.isLive)
         const key = sectionKey(section.id)
         const isOpen = sectionOpen(section.id, state)
         const c = countTasks(items.map(asTask))
-
-        return (
-          <Box key={`doc-${pane}-${section.id}`} flexDirection="column">
-            <Box flexDirection="row" gap={1}>
-              <Button
-                key={`head-${pane}:${section.id}`}
-                plain
-                label={isOpen ? '▾' : '▸'}
-                onPress={() => toggle(key, !isOpen)}
-              />
-              <Text color={SECTION_DOT[state]}>●</Text>
-              <Box flexGrow={1}>{markedText(els, section.title, words, { bold: true, wrap: 'truncate-end' })}</Box>
-              <Text dimColor>
-                {c.done}/{c.total}
+        const columns = termColumns(section)
+        /** The done/total at a row's end, as wide on every row, so the part columns line up. */
+        const tail = Math.max(`${c.done}/${c.total}`.length, ...section.groups.map(g => `${g.items.length}/${g.items.length}`.length))
+        const countCells = (list: readonly DocItem[], prefix: string) =>
+          countsFor(list, columns.map(col => col.key)).map((col, i) => (
+            <Box key={`count-${prefix}-${col.key}`} width={columns[i]!.w}>
+              <Text color={col.total === 0 ? undefined : TONE_KEY[col.done === col.total ? 'done' : 'pending']} dimColor={col.total === 0}>
+                {col.total === 0 ? '–' : `${col.key} ${col.done}/${col.total}`}
               </Text>
             </Box>
-            {isOpen && ownItems.map(item => itemRow(item, 4))}
+          ))
+
+        return (
+          <Box key={`doc-${pane}-${section.id}`} flexDirection="column" marginBottom={1}>
+            <Box flexDirection="row" gap={1}>
+              <Button key={`head-${pane}:${section.id}`} plain label={isOpen ? '▾' : '▸'} onPress={() => toggle(key, !isOpen)} />
+              <Text color={TONE_KEY[SECTION_TONE[state]]}>●</Text>
+              <Box flexGrow={1} flexShrink={1}>
+                {markedText(els, section.title, words, { bold: true, wrap: 'truncate-end' })}
+              </Box>
+              {section.items.some(i => i.facets) && countCells(section.items, `${pane}-${section.id}`)}
+              <Box width={tail} justifyContent="flex-end">
+                <Text dimColor>
+                  {c.done}/{c.total}
+                </Text>
+              </Box>
+            </Box>
+            {isOpen && ownItems.map(item => itemRow(item, 4, columns, section.title, tail))}
             {isOpen &&
               groups.map(({ group, items: groupItems }) => {
                 const gkey = groupKey(group.id)
                 const gOpen = groupOpen(group.id)
                 const gc = countTasks(group.items.map(asTask))
+                const tone = toneOf(gc.done, gc.total, group.isLive)
 
                 return (
                   <Box key={`grp-${pane}-${group.id}`} flexDirection="column" paddingLeft={2}>
                     <Box flexDirection="row" gap={1}>
-                      <Button
-                        key={`group-${pane}:${group.id}`}
-                        plain
-                        label={gOpen ? '▾' : '▸'}
-                        onPress={() => toggle(gkey, !gOpen)}
-                      />
-                      <Box flexGrow={1}>{markedText(els, group.title, words, { wrap: 'truncate-end' })}</Box>
-                      {columnCounts(group.items).map(col => (
-                        <Text key={`count-${pane}-${group.id}-${col.key}`} color={col.done === col.total ? C.green : C.gray}>
-                          {col.key} {col.done}/{col.total}
+                      <Button key={`group-${pane}:${group.id}`} plain label={gOpen ? '▾' : '▸'} onPress={() => toggle(gkey, !gOpen)} />
+                      <Text color={TONE_KEY[tone]}>{ringGlyph(gc.total ? gc.done / gc.total : 0)}</Text>
+                      <Box flexGrow={1} flexShrink={1}>
+                        {markedText(els, group.title, words, { wrap: 'truncate-end' })}
+                      </Box>
+                      {countCells(group.items, `${pane}-${group.id}`)}
+                      <Box width={tail} justifyContent="flex-end">
+                        <Text>
+                          {gc.done}/{gc.total}
                         </Text>
-                      ))}
-                      <Text color={gc.done === gc.total ? C.green : C.blue}>
-                        {ringGlyph(gc.total ? gc.done / gc.total : 0)}
-                      </Text>
-                      <Text>
-                        {gc.done}/{gc.total}
-                      </Text>
+                      </Box>
                     </Box>
-                    {gOpen && groupItems.map(item => itemRow(item, 4))}
+                    {gOpen && groupItems.map(item => itemRow(item, 2, columns, group.title, tail))}
                   </Box>
                 )
               })}
           </Box>
         )
       })}
-      {detail}
     </Box>
   )
 }
@@ -1505,7 +1652,7 @@ const redrawAfterLoad = async ($: $) => {
 
 /** What the board draws when drawing it failed: the reason, never a blank pane. */
 const failedText = (els: Els, err: unknown) => (
-  <els.Text color={INK.sub}>
+  <els.Text dimColor>
     Agent Track could not draw this tab: {err instanceof Error ? err.message : String(err)}. Press ▦ Progress twice to
     open it again.
   </els.Text>
@@ -1607,13 +1754,21 @@ export const register: Register = (on, options) => {
           label={isUpdating ? '↻ Checking…' : '↻ Check updates'}
           onPress={() => void pressCheckUpdates($)}
         />
-        <Text color={INK.sub} wrap="truncate-end">
+        <Text dimColor wrap="truncate-end">
           {parts.length > 0 ? parts.join(' · ') : 'No tasks yet'}
         </Text>
       </Box>
     )
   })
 
+
+  /** A new theme redraws the board, so its drawings take the new palette. */
+  on('config.set', { key: 'theme' }, async ($, e, next) => {
+    const set = await next(e)
+    $.ui.invalidate('ui.render')
+
+    return set
+  })
 
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin.kind === 'person') await update($, dismissed, () => true)
@@ -1675,7 +1830,8 @@ export const register: Register = (on, options) => {
 
     return ran
   })
-  on('tool.call', { tool: 'PowerShell' }, async ($, e, next) => {
+  // PowerShell is a Windows tool this build's type table may not list.
+  on('tool.call', { tool: 'PowerShell' } as unknown as { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
     await reread($, JSON.stringify(e))
 
@@ -1765,9 +1921,19 @@ export const register: Register = (on, options) => {
   })
 }
 
+/** The host's theme setting (`dark`, `light`, `auto`…), when the engine lists it. */
+const hostTheme = async ($: $) => {
+  try {
+    return (await $.config.list()).find(row => row.key === 'theme')?.value
+  } catch {
+    return undefined
+  }
+}
+
 /** The board pane's drawing: the tab bar, and the picked tab below it. */
 const drawBoard = async ($: $, e: RenderInput<'Pane'>) => {
   paneColumns = e.props.bodyColumns
+  if (e.surface !== 'terminal') useScheme(await hostTheme($))
   const els = $.ui.resolve(e)
   const { Box, Text } = els
   const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
@@ -1778,11 +1944,10 @@ const drawBoard = async ($: $, e: RenderInput<'Pane'>) => {
     active.id === PANE
       ? await drawAgents($, e)
       : ((await drawDoc($, e, active.id)) ?? <Text dimColor>Loading {active.title}…</Text>)
-  const picked = await read($, scope)
 
   return (
-    <Box flexDirection="column">
-      {Svg ? tabStrip($, els, Svg, tabs, active.id, picked) : tabRowText($, els, tabs, active.id, picked)}
+    <Box flexDirection="column" width={Svg ? Math.min(paneColumns, maxColumns()) : undefined}>
+      {Svg ? tabStrip($, els, Svg, layout(widthFor(paneColumns)), tabs, active.id) : tabRowText($, els, tabs, active.id)}
       {body}
     </Box>
   )
