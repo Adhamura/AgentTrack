@@ -190,6 +190,49 @@ export const summarySvg = (c: Summary, filter: Filter = 'all') => {
   )
 }
 
+/** The board's own tab bar: each tab's title and percent; the picked one on a gray pill, as the app's own nav. */
+export type TabSpec = { id: string; title: string; percent?: number }
+
+export const TABS_H = 50
+const TAB_TOP = 5
+const TAB_H = 40
+
+/** Where each tab sits on the bar, in its 925 px: the click targets laid over them use the same numbers. */
+export const tabsLayout = (tabs: readonly TabSpec[]) => {
+  let x = 0
+
+  return tabs.map(t => {
+    const pct = t.percent === undefined ? '' : `${t.percent}%`
+    const w = 40 + t.title.length * 10.6 + (pct ? 10 + pct.length * 9.4 : 0)
+    const at = { id: t.id, x, w, top: TAB_TOP, h: TAB_H }
+    x += w + 6
+
+    return at
+  })
+}
+
+export const tabsSvg = (tabs: readonly TabSpec[], active: string) => {
+  const at = tabsLayout(tabs)
+
+  return svg(
+    TABS_H,
+    tabs
+      .map((t, i) => {
+        const { x, w } = at[i] ?? { x: 0, w: 0 }
+        const isOn = t.id === active
+        const pct = t.percent === undefined ? '' : `${t.percent}%`
+
+        return (
+          (isOn ? `<rect x="${x}" y="${TAB_TOP}" width="${w}" height="${TAB_H}" rx="12" fill="#ececee"/>` : '') +
+          `<text x="${x + 16}" y="31" font-size="19" fill="${isOn ? INK.text : INK.label}"${isOn ? ' font-weight="500"' : ''}>${esc(t.title)}` +
+          (pct ? `<tspan dx="10" font-size="16" font-weight="400" fill="${INK.sub}">${pct}</tspan>` : '') +
+          `</text>`
+        )
+      })
+      .join(''),
+  )
+}
+
 /** A section's gray header bar with its chevron; a transparent Button lies over the chevron. */
 export const sectionHeadSvg = (
   id: SectionId,

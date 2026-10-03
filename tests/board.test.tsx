@@ -241,7 +241,7 @@ test('the summary pills filter the board by status, with All as the way back', a
 
 })
 
-test('a project tab filters its checklist the same way', async ($, on) => {
+test('project checklists are tabs inside the one board pane, each filtering on its own', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   on('agent.list', () => ({ value: [] }))
   on('ui.panes', () => ({ value: [] }))
@@ -253,15 +253,18 @@ test('a project tab filters its checklist the same way', async ($, on) => {
   on('fs.stat', () => ({ value: { kind: 'file', mtimeMs: 1000, size: 1, realPath: '/p' } as never }))
   on('fs.list', () => ({ value: [] }))
   on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }) as never)
   on('tool.register', () => ({ value: { tool: 'mcp__agent-track__todo' } }))
   on('command.register', () => ({ value: { command: 'agent-track' } }))
   on('session.start', ($, e) => e as never)
   on('env.get', () => ({ value: undefined }))
   on('session.id', () => ({ value: 'me' }))
   await $.session.start({ cwd: '/p', surface: 'terminal', isInteractive: true } as never)
-  const pane = { component: 'Pane', requestId: 'agent-track-roadmap' } as const
   for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'agent-track', surface, ...pane, props: paneProps as never })
+    const ui = await $.ui.mount({ plugin: 'agent-track', surface, ...PANE, props: paneProps as never })
+    await ui.press({ key: 'tab-agent-track-roadmap' })
+    expect(await ui.find({ key: 'filter-agent-track-roadmap:all' })).toBeDefined()
+    expect(await ui.find({ key: 'filter-agent-track:all' })).toBeUndefined()
     const ids = async () => (await ui.findAll({ type: 'Button' })).map(b => String(b.key)).filter(k => k.startsWith('item-'))
     expect(await ids()).toEqual([])
     await ui.press({ key: 'filter-agent-track-roadmap:pending' })
@@ -269,6 +272,8 @@ test('a project tab filters its checklist the same way', async ($, on) => {
     expect(await ui.find({ key: 'head-agent-track-roadmap:done-part' })).toBeUndefined()
     await ui.press({ key: 'filter-agent-track-roadmap:pending' })
     expect(await ids()).toEqual([])
+    await ui.press({ key: 'tab-agent-track' })
+    expect(await ui.find({ key: 'filter-agent-track:all' })).toBeDefined()
     await ui.unmount()
   }
 })

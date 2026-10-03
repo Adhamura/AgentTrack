@@ -11,7 +11,7 @@ A live progress board for Claude Code. Every session, every subagent and every t
 - **One row per session or subagent**: its title, what it is doing right now, a progress ring with done/total, and how long ago it last changed. New subagents appear the moment they start.
 - **Tasks** under each row, from the agent's todo list, with a status chip. The ⋯ button opens a details box with when each task was created, started and finished, and how long it took.
 - **Every session on your machine**: each session running Agent Track publishes its board, so any board shows all of them. Sessions without Agent Track still appear, with their busy or idle state.
-- **Project tabs**: your project's own checklists (a roadmap, an art list, anything in Markdown with `- [ ]` boxes) each get a tab beside **Agents**, in the same design. See [Project tabs](#project-tabs).
+- **Project tabs**: your project's own checklists (a roadmap, an art list, anything in Markdown with `- [ ]` boxes) each get a tab beside **Agents**, in the same design. The tabs sit at the top of the one board pane; click one to switch. See [Project tabs](#project-tabs).
 
 The desktop app gets the full drawing above. The terminal gets the same layout in text and color.
 

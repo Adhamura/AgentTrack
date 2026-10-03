@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 import type { Category, DocBoard, DocItem, Peer, Snapshot, Task } from '../types'
 import {
@@ -29,12 +29,14 @@ import {
 import type { Filter, SectionId, Summary, TodoItem } from './board'
 import { CONFIG_FILE, applyLive, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
 import type { DocTab } from './docs'
-import type { Motion } from './look'
-import { INK, PILL_H, PILL_TOP, SECTION_DOT, SUMMARY_H, W, agentRowSvg, emptyRowSvg, headerSvg, sectionHeadSvg, summaryPills, summarySvg, taskRowSvg } from './look'
+import type { Motion, TabSpec } from './look'
+import { INK, PILL_H, PILL_TOP, SECTION_DOT, SUMMARY_H, TABS_H, W, tabsLayout, tabsSvg, agentRowSvg, emptyRowSvg, headerSvg, sectionHeadSvg, summaryPills, summarySvg, taskRowSvg } from './look'
 
 const PANE = 'agent-track'
 const TODO_TOOL = 'mcp__agent-track__todo'
 const TITLE = 'Agents'
+/** The pane's own title in the app's tab bar; its tabs are drawn inside it. */
+const PANE_TITLE = 'Progress'
 
 const board = atom({ plugin: 'agent-track', key: 'board' } as const, emptyBoard())
 const collapsed = atom({ plugin: 'agent-track', key: 'collapsed' } as const, [] as string[])
@@ -47,6 +49,7 @@ const docs = atom({ plugin: 'agent-track', key: 'docs' } as const, {} as Record<
 const liveWork = atom({ plugin: 'agent-track', key: 'liveWork' } as const, [] as string[])
 const docHistory = atom({ plugin: 'agent-track', key: 'docHistory' } as const, {} as Record<string, [number, number][]>)
 const toggled = atom({ plugin: 'agent-track', key: 'toggled' } as const, {} as Record<string, { at: number; open: boolean }>)
+const view = atom({ plugin: 'agent-track', key: 'view' } as const, PANE as string)
 const filters = atom({ plugin: 'agent-track', key: 'filter' } as const, {} as Record<string, Filter>)
 
 /** How long after a toggle its drawing still plays the turn. */
@@ -86,32 +89,46 @@ const pickFilter = ($: $, pane: string, f: Filter) =>
   update($, filters, all => ({ ...all, [pane]: all[pane] === f ? 'all' : f }))
 
 /**
- * The drawn summary card with a click target over each status pill: a row laid
- * over the card whose boxes take the pills' own share of its width and height.
+ * Click targets over a drawing: a row laid over it whose boxes take each
+ * target's own share of the drawing's width (whole percents, rounded at each
+ * edge so the cells add up without drifting) and the band `top`..`top + band` of its height.
  */
-const summaryCard = ($: $, els: Els, Art: SvgEl, pane: string, sum: Summary, filter: Filter) => {
+const hitRow = (
+  els: Els,
+  height: number,
+  top: number,
+  band: number,
+  spots: readonly { key: string; x: number; w: number; onPress: () => void }[],
+) => {
   const { Box, Button } = els
-  const pills = summaryPills(sum)
-  /** Whole percents, rounded at each edge so the cells add up without drifting. */
   const at = (px: number) => Math.round((px * 100) / W)
   let end = 0
-  const cells = pills.flatMap(p => {
+  const cells = spots.flatMap(p => {
     const [from, to] = [at(p.x), at(p.x + p.w)]
     const gap = from - end
     end = to
 
     return [
-      <Box key={`gap-${p.id}`} width={`${gap}%`} />,
-      <Box key={`pill-${pane}-${p.id}`} width={`${to - from}%`} alignItems="center" justifyContent="center">
-        <Button
-          key={`filter-${pane}:${p.id}`}
-          plain
-          label={' '.repeat(Math.max(4, Math.round(p.w / 13)))}
-          onPress={() => pickFilter($, pane, p.id)}
-        />
+      <Box key={`gap-${p.key}`} width={`${gap}%`} />,
+      <Box key={`spot-${p.key}`} width={`${to - from}%`} alignItems="center" justifyContent="center">
+        <Button key={p.key} plain label={' '.repeat(Math.max(4, Math.round(p.w / 13)))} onPress={p.onPress} />
       </Box>,
     ]
   })
+
+  return (
+    <Box position="absolute" left={0} right={0} top={0} bottom={0} flexDirection="column">
+      <Box height={pct(top, height)} />
+      <Box height={pct(band, height)} flexDirection="row">
+        {cells}
+      </Box>
+    </Box>
+  )
+}
+
+/** The drawn summary card with a click target over each status pill. */
+const summaryCard = ($: $, els: Els, Art: SvgEl, pane: string, sum: Summary, filter: Filter) => {
+  const { Box } = els
 
   return (
     <Box marginY={1} flexDirection="column">
@@ -119,12 +136,75 @@ const summaryCard = ($: $, els: Els, Art: SvgEl, pane: string, sum: Summary, fil
         source={summarySvg(sum, filter)}
         alt={`${sum.percent}%: ${sum.done} completed, ${sum.inProgress} in progress, ${sum.notStarted} not started. Showing ${FILTER_ALT[filter]}.`}
       />
-      <Box position="absolute" left={0} right={0} top={0} bottom={0} flexDirection="column">
-        <Box height={pct(PILL_TOP, SUMMARY_H)} />
-        <Box height={pct(PILL_H, SUMMARY_H)} flexDirection="row">
-          {cells}
-        </Box>
-      </Box>
+      {hitRow(
+        els,
+        SUMMARY_H,
+        PILL_TOP,
+        PILL_H,
+        summaryPills(sum).map(p => ({ key: `filter-${pane}:${p.id}`, x: p.x, w: p.w, onPress: () => void pickFilter($, pane, p.id) })),
+      )}
+    </Box>
+  )
+}
+
+/** The board's tabs: Agents, then each project checklist, each with its percent. */
+const tabList = async ($: $): Promise<TabSpec[]> => {
+  const sum = summarize(mergePeers(await read($, board), await read($, selfName), await read($, peers)))
+  const live = await read($, liveWork)
+  const all = await read($, docs)
+
+  return [
+    { id: PANE, title: TITLE, percent: sum.total > 0 ? sum.percent : undefined },
+    ...docCtx.tabs.map(tab => {
+      const id = tabPaneId(tab)
+      const raw = all[id]
+      const c = raw && !raw.error ? countTasks(applyLive(raw, live).sections.flatMap(itemsOf).map(itemAsTask(raw.updatedAt))) : undefined
+
+      return { id, title: tab.title, percent: c?.percent }
+    }),
+  ]
+}
+
+/** The desktop tab bar: drawn, with a click target over each tab. */
+const tabStrip = ($: $, els: Els, Art: SvgEl, tabs: readonly TabSpec[], active: string) => {
+  const { Box } = els
+
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Art
+        source={tabsSvg(tabs, active)}
+        alt={`Tabs: ${tabs.map(t => (t.id === active ? `${t.title} (shown)` : t.title)).join(', ')}`}
+      />
+      {hitRow(
+        els,
+        TABS_H,
+        0,
+        TABS_H,
+        tabsLayout(tabs).map(t => ({ key: `tab-${t.id}`, x: t.x, w: t.w, onPress: () => void update($, view, () => t.id) })),
+      )}
+    </Box>
+  )
+}
+
+/** The terminal tab bar: a Button per tab, the shown one in brackets. */
+const tabRowText = ($: $, els: Els, tabs: readonly TabSpec[], active: string) => {
+  const { Box, Button } = els
+
+  return (
+    <Box flexDirection="row" gap={2} marginBottom={1}>
+      {tabs.map(t => {
+        const label = `${t.title}${t.percent === undefined ? '' : ` ${t.percent}%`}`
+
+        return (
+          <Button
+            key={`tab-${t.id}`}
+            plain
+            label={t.id === active ? `[${label}]` : label}
+            dimColor={t.id !== active}
+            onPress={() => void update($, view, () => t.id)}
+          />
+        )
+      })}
     </Box>
   )
 }
@@ -161,7 +241,7 @@ const isUp = async ($: $) => (await $.ui.panes()).some(p => p.id === PANE)
 /** Opens the board unasked the first time there is something to show. */
 const autoOpen = async ($: $) => {
   if ((await read($, dismissed)) || (await isUp($))) return
-  void $.ui.open({ id: PANE, title: TITLE })
+  void $.ui.open({ id: PANE, title: PANE_TITLE })
 }
 
 /** Makes sure the loop the event ran in has a category, named from the agent list. */
@@ -364,23 +444,728 @@ const refreshLive = async ($: $) => {
 const toggleBoard = async ($: $, reload: boolean) => {
   await loadDocConfig($)
   await refreshDocs($, true)
-  const ours = [{ id: PANE, title: TITLE }, ...docPanes()]
-  const open = new Set((await $.ui.panes()).map(p => p.id))
-  if (!reload && ours.some(p => open.has(p.id))) {
-    for (const p of ours) if (open.has(p.id)) await $.ui.close({ id: p.id })
+  await closeOldTabs($)
+  if (!reload && (await isUp($))) {
+    await $.ui.close({ id: PANE })
 
     return 'Progress board hidden.'
   }
   await update($, dismissed, () => false)
-  for (const p of ours) await $.ui.open(p)
+  await $.ui.open({ id: PANE, title: PANE_TITLE })
 
-  return `Progress board shown: ${ours.map(p => p.title).join(', ')}.`
+  return `Progress board shown: ${[TITLE, ...docCtx.tabs.map(t => t.title)].join(', ')}.`
 }
 
-const docPanes = () => docCtx.tabs.map(tab => ({ id: tabPaneId(tab), title: tab.title }))
+/** Closes the separate pane each project tab had before 1.2.0, when one is still open. */
+const closeOldTabs = async ($: $) => {
+  const ids = new Set(docCtx.tabs.map(tabPaneId))
+  for (const p of await $.ui.panes()) if (ids.has(p.id)) await $.ui.close({ id: p.id })
+}
+
+/** The person's name for the greeting, from the plugin's options. */
+let userName = ''
+
+const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
+  const els = $.ui.resolve(e)
+  const { Box, Text, Button } = els
+  const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
+
+  await read($, tick)
+  const now = await $.clock.now()
+  const b = mergePeers(await read($, board), await read($, selfName), await read($, peers))
+  const shut = new Set(await read($, collapsed))
+  const pick = await read($, selected)
+  const sum = summarize(b)
+  const filter = (await read($, filters))[PANE] ?? 'all'
+  const isFiltered = filter !== 'all'
+  /** Under a filter sections and rows start open, so the matching tasks show; their own keys flip that. */
+  const sectionKey = (id: string) => (isFiltered ? `sf:${id}` : `s:${id}`)
+  const foldKey = (id: string) => (isFiltered ? `of:${id}` : `o:${id}`)
+  const isRowOpen = (id: string) => shut.has(foldKey(id)) !== isFiltered
+  const shownSections = grouped(b)
+    .map(section => ({ ...section, categories: section.categories.filter(cat => keepsRow(cat, filter)) }))
+    .filter(section => !isFiltered || section.categories.length > 0)
+
+  const flips = await read($, toggled)
+  /** Flips one section or agent; `open` is the state it lands in, so the turn plays only once the flip is drawn. */
+  const toggle = async (key: string, open: boolean) => {
+    const at = await $.clock.now()
+    await update($, toggled, all => ({
+      ...Object.fromEntries(Object.entries(all).filter(([, t]) => at - t.at < MOTION_MS)),
+      [key]: { at, open },
+    }))
+    await update($, collapsed, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
+  }
+  /** Which way a chevron turns if it was toggled a moment ago; nothing once it has settled. */
+  const motionOf = (key: string, isOpen: boolean): Motion => {
+    const flip = flips[key]
+
+    return flip && flip.open === isOpen && now - flip.at < MOTION_MS ? (isOpen ? 'open' : 'close') : undefined
+  }
+
+  if (Svg) {
+    const Art = Svg
+    const pickBy = (key: string) => update($, selected, cur => (cur === key ? null : key))
+    const sections = shownSections
+    const working = grouped(b).find(s => s.id === 'working')?.categories.length ?? 0
+    const subtitle =
+      working > 0
+        ? 'Working on things! I’ll ping you.'
+        : sum.total > 0 && sum.done === sum.total
+          ? 'All caught up.'
+          : 'Nothing running right now.'
+    const completions = b.categories.flatMap(c => c.tasks.flatMap(t => (t.completedAt ? [t.completedAt] : [])))
+
+    /** One drawn strip with native controls laid over the slots it leaves blank; unkeyed, so it is no hover scope. */
+    const strip = (key: string, source: string, alt: string, left?: JSX.Element, right?: JSX.Element, cx = 37) => (
+      <Box flexDirection="column">
+        <Art source={source} alt={alt} />
+        {left && (
+          <Box
+            position="absolute"
+            left={0}
+            top={0}
+            bottom={0}
+            width={hitWidth(cx)}
+            alignItems="center"
+            justifyContent="center"
+          >
+            {left}
+          </Box>
+        )}
+        {right && (
+          <Box position="absolute" right={1} top={0} bottom={0} justifyContent="center">
+            {right}
+          </Box>
+        )}
+      </Box>
+    )
+
+    const detail = (() => {
+      if (!pick) return null
+      const [catId, taskId] = pick.split('::')
+      const cat = b.categories.find(c => c.id === catId)
+      if (!cat) return null
+      const task = cat.tasks.find(t => t.id === taskId)
+      const c = countTasks(cat.tasks)
+      const end = task?.completedAt ?? (task?.status === 'in_progress' ? now : undefined)
+
+      return (
+        <Box key="detail" flexDirection="column" borderStyle="round" borderColor={INK.border} paddingX={1} marginTop={1}>
+          <Box flexDirection="row" gap={1}>
+            <Box flexGrow={1}>
+              <Text bold color={INK.text} wrap="truncate-end">
+                {task ? task.title : cat.title}
+              </Text>
+            </Box>
+            <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
+          </Box>
+          {task ? (
+            <Box flexDirection="column">
+              <Text color={INK.sub}>
+                {task.status === 'completed' ? 'Done' : task.status === 'in_progress' ? 'In progress' : 'Not started'} · in{' '}
+                {cat.title}
+              </Text>
+              {task.activeForm && task.activeForm !== task.title && <Text color={INK.sub}>Step: {task.activeForm}</Text>}
+              {task.description && <Text wrap="wrap">{task.description}</Text>}
+              <Text color={INK.sub}>
+                Created {clock(task.createdAt)} · Started {clock(task.startedAt)} · Finished {clock(task.completedAt)}
+              </Text>
+              <Text color={INK.sub}>Time spent {duration(task.startedAt, end)}</Text>
+            </Box>
+          ) : (
+            <Box flexDirection="column">
+              <Text color={INK.sub}>{[cat.agentType, cat.note].filter(Boolean).join(' · ') || cat.kind}</Text>
+              <Text color={INK.sub}>
+                {c.done}/{c.total} tasks · started {clock(cat.startedAt)} · last change {clock(cat.updatedAt)}
+              </Text>
+              <Text color={INK.sub}>{currentStep(cat)}</Text>
+            </Box>
+          )}
+        </Box>
+      )
+    })()
+
+    return (
+      <Box flexDirection="column">
+        <Art source={headerSvg(userName, subtitle, completions, now)} alt={`Welcome back${userName ? `, ${userName}` : ''}. ${subtitle}`} />
+        {summaryCard($, els, Art, PANE, sum, filter)}
+        {detail}
+        {isFiltered && sections.length === 0 && (
+          <Art source={emptyRowSvg(`Nothing ${FILTER_ALT[filter]}.`)} alt={`Nothing ${FILTER_ALT[filter]}.`} />
+        )}
+        {sections.map(section => {
+          const key = sectionKey(section.id)
+          const isOpen = !shut.has(key)
+          const count = section.categories.length
+          const sectionMotion = motionOf(key, isOpen)
+
+          return (
+            <Box key={`sec-${section.id}`} flexDirection="column" marginBottom={1}>
+              {strip(
+                `head-row-${section.id}`,
+                sectionHeadSvg(section.id, section.title, count, isOpen, sectionMotion, sectionProgress(section.categories)),
+                `${section.title}, ${count}, ${isOpen ? 'expanded' : 'collapsed'}`,
+                <Button key={`head-${section.id}`} plain label={HIT} onPress={() => toggle(key, !isOpen)} />,
+                undefined,
+                24,
+              )}
+              {isOpen && count === 0 && (
+                <Art source={emptyRowSvg(section.empty, { order: sectionMotion ? 0 : undefined })} alt={section.empty} />
+              )}
+              {isOpen &&
+                section.categories.flatMap((cat, i) => {
+                  const fold = foldKey(cat.id)
+                  const isExpanded = isRowOpen(cat.id)
+                  const tasksShown = tasksFor(cat, filter)
+                  const isLast = i === count - 1
+                  const foldMotion = motionOf(fold, isExpanded)
+                  const row = strip(
+                    `agent-${cat.id}`,
+                    agentRowSvg(cat, now, {
+                      isLast,
+                      isOpen: isExpanded,
+                      motion: foldMotion,
+                      order: sectionMotion === 'open' ? i : undefined,
+                    }),
+                    `${cat.title}: ${currentStep(cat)}, ${isExpanded ? 'expanded' : 'collapsed'}`,
+                    <Button key={`fold-${cat.id}`} plain label={HIT} onPress={() => toggle(fold, !isExpanded)} />,
+                    <Button key={`more-${cat.id}`} plain label="⋯" onPress={() => pickBy(`${cat.id}::`)} />,
+                  )
+                  if (!isExpanded) return [row]
+                  const reveal = foldMotion === 'open'
+                  if (tasksShown.length === 0) {
+                    if (isFiltered) return [row]
+
+                    return [
+                      row,
+                      <Art
+                        key={`none-${cat.id}`}
+                        source={emptyRowSvg('No tasks yet.', { isLast, indent: 121, order: reveal ? 0 : undefined })}
+                        alt="No tasks yet."
+                      />,
+                    ]
+                  }
+                  const tasks = tasksShown.map((task, j) =>
+                    strip(
+                      `row-${cat.id}::${task.id}`,
+                      taskRowSvg(task, now, {
+                        isLast: isLast && j === tasksShown.length - 1,
+                        isPicked: pick === `${cat.id}::${task.id}`,
+                        order: reveal ? j : undefined,
+                      }),
+                      `${task.title}: ${task.status}`,
+                      undefined,
+                      <Button key={`task-${cat.id}::${task.id}`} plain label="⋯" onPress={() => pickBy(`${cat.id}::${task.id}`)} />,
+                    ),
+                  )
+
+                  return [row, ...tasks]
+                })}
+            </Box>
+          )
+        })}
+      </Box>
+    )
+  }
+
+  const ring = (fraction: number, color: string) => <Text color={color}>{ringGlyph(fraction)}</Text>
+
+  const chip = (task: Task) => {
+    const [label, color] =
+      task.status === 'completed'
+        ? ['Done', C.green]
+        : task.status === 'in_progress'
+          ? ['In progress', C.blue]
+          : ['Not started', C.gray]
+
+    return <Text color={color}>{label}</Text>
+  }
+
+  const glyph = (task: Task) =>
+    task.status === 'completed' ? (
+      <Text color={C.green}>✓</Text>
+    ) : task.status === 'in_progress' ? (
+      <Text color={C.blue}>◐</Text>
+    ) : (
+      <Text color={C.gray}>○</Text>
+    )
+
+  const summary = (
+    <Box flexDirection="column" marginBottom={1}>
+      <Box flexDirection="row" gap={1}>
+        <Text bold>{sum.percent}%</Text>
+        <Text color={C.green}>{bar(sum.percent / 100, 16)}</Text>
+        <Text dimColor>
+          {sum.done}/{sum.total} {sum.unit}
+        </Text>
+      </Box>
+      {summaryPillsText($, els, PANE, sum, filter)}
+    </Box>
+  )
+
+  const taskRow = (cat: Category, task: Task) => {
+    const key = `${cat.id}::${task.id}`
+    const isPicked = pick === key
+    const when = task.status === 'completed' ? task.completedAt : (task.startedAt ?? task.createdAt)
+
+    return (
+      <Box key={`row-${key}`} flexDirection="row" gap={1} paddingLeft={4}>
+        {glyph(task)}
+        <Box flexGrow={1}>
+          <Button
+            key={`task-${key}`}
+            plain
+            label={task.title}
+            dimColor={task.status === 'completed' && !isPicked}
+            onPress={() => update($, selected, cur => (cur === key ? null : key))}
+          />
+        </Box>
+        {chip(task)}
+        <Text dimColor>{relTime(when, now)}</Text>
+      </Box>
+    )
+  }
+
+  const agentRow = (cat: Category) => {
+    const c = countTasks(cat.tasks)
+    const key = foldKey(cat.id)
+    const isOpen = isRowOpen(cat.id)
+    const live = cat.isLive && !cat.isFinished
+    const color = c.total > 0 && c.done === c.total ? C.green : C.blue
+
+    return (
+      <Box key={`agent-${cat.id}`} flexDirection="column">
+        <Box flexDirection="row" gap={1}>
+          <Button key={`fold-${cat.id}`} plain label={isOpen ? '▾' : '▸'} onPress={() => toggle(key, !isOpen)} />
+          <Text color={rowCheck(cat) === 'empty' ? INK.box : INK.check}>
+            {rowCheck(cat) === 'done' ? '☑' : rowCheck(cat) === 'mixed' ? '⊟' : '☐'}
+          </Text>
+          <Box flexGrow={1}>
+            <Text wrap="truncate-end">
+              {cat.title}
+              {live ? <Text color={C.green}> ●</Text> : ''}
+            </Text>
+          </Box>
+          <Box flexDirection="row" gap={1}>
+            {ring(c.total === 0 ? 0 : c.done / c.total, color)}
+            <Text>
+              {c.done}/{c.total}
+            </Text>
+            <Text dimColor>{relTime(cat.updatedAt, now) || '—'}</Text>
+            <Button key={`more-${cat.id}`} plain label="⋯" onPress={() => update($, selected, cur => (cur === `${cat.id}::` ? null : `${cat.id}::`))} />
+          </Box>
+        </Box>
+        <Box paddingLeft={6}>
+          <Text dimColor wrap="truncate-end">
+            {cat.agentType && cat.kind === 'agent' ? `${cat.agentType} · ` : ''}
+            {currentStep(cat)}
+          </Text>
+        </Box>
+        {isOpen && tasksFor(cat, filter).map(task => taskRow(cat, task))}
+      </Box>
+    )
+  }
+
+  const sections = shownSections.map(section => {
+    const key = sectionKey(section.id)
+    const isOpen = !shut.has(key)
+
+    return (
+      <Box key={`sec-${section.id}`} flexDirection="column" marginBottom={1}>
+        <Box flexDirection="row" gap={1}>
+          <Button key={`head-${section.id}`} plain label={isOpen ? '▾' : '▸'} onPress={() => toggle(key, !isOpen)} />
+          <Text color={SECTION_DOT[section.id]}>●</Text>
+          <Text bold>{section.title}</Text>
+          <Text dimColor>{section.categories.length}</Text>
+        </Box>
+        {isOpen && section.categories.length === 0 && (
+          <Box paddingLeft={2}>
+            <Text dimColor>{section.empty}</Text>
+          </Box>
+        )}
+        {isOpen && section.categories.map(agentRow)}
+      </Box>
+    )
+  })
+
+  const detail = (() => {
+    if (!pick) return null
+    const [catId, taskId] = pick.split('::')
+    const cat = b.categories.find(c => c.id === catId)
+    const task = cat?.tasks.find(t => t.id === taskId)
+    if (!cat) return null
+    if (!task) {
+      const c = countTasks(cat.tasks)
+
+      return (
+        <Box key="detail" flexDirection="column" borderStyle="round" borderColor={C.gray} paddingX={1}>
+          <Box flexDirection="row" gap={1}>
+            <Box flexGrow={1}>
+              <Text bold wrap="truncate-end">
+                {cat.title}
+              </Text>
+            </Box>
+            <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
+          </Box>
+          <Text dimColor>{[cat.agentType, cat.note].filter(Boolean).join(' · ') || cat.kind}</Text>
+          <Text dimColor>
+            {c.done}/{c.total} tasks · started {clock(cat.startedAt)} · last change {clock(cat.updatedAt)}
+          </Text>
+        </Box>
+      )
+    }
+    const end = task.completedAt ?? (task.status === 'in_progress' ? now : undefined)
+
+    return (
+      <Box
+        key="detail"
+        flexDirection="column"
+        borderStyle="round"
+        borderColor={C.gray}
+        paddingX={1}
+      >
+        <Box flexDirection="row" gap={1}>
+          <Box flexGrow={1}>
+            <Text bold wrap="truncate-end">
+              {task.title}
+            </Text>
+          </Box>
+          <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
+        </Box>
+        <Box flexDirection="row" gap={1}>
+          {chip(task)}
+          <Text dimColor>in {cat.title}</Text>
+        </Box>
+        {task.activeForm && task.activeForm !== task.title && <Text dimColor>Step: {task.activeForm}</Text>}
+        {task.description && <Text wrap="wrap">{task.description}</Text>}
+        <Text dimColor>
+          Created {clock(task.createdAt)} · Started {clock(task.startedAt)} · Finished {clock(task.completedAt)}
+        </Text>
+        <Text dimColor>Time spent {duration(task.startedAt, end)}</Text>
+      </Box>
+    )
+  })()
+
+  return (
+    <Box flexDirection="column">
+      {summary}
+      {b.categories.length === 0 ? (
+        <Text dimColor>No agents have a todo list yet. They show up here as soon as one does.</Text>
+      ) : isFiltered && sections.length === 0 ? (
+        <Text dimColor>Nothing {FILTER_ALT[filter]}.</Text>
+      ) : (
+        sections
+      )}
+      {detail}
+    </Box>
+  )
+}
+
+/** A project tab: one checklist file in the board's design. */
+const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
+  const raw = (await read($, docs))[pane]
+  if (!raw) return undefined
+  const doc = applyLive(raw, await read($, liveWork))
+  const els = $.ui.resolve(e)
+  const { Box, Text, Button } = els
+  const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
+
+  await read($, tick)
+  const now = await $.clock.now()
+  const shut = new Set(await read($, collapsed))
+  const flips = await read($, toggled)
+  const pick = await read($, selected)
+  const history = (await read($, docHistory))[pane] ?? []
+
+  const all = doc.sections.flatMap(itemsOf)
+  const asTask = itemAsTask(doc.updatedAt)
+  const sum = { ...countTasks(all.map(asTask)), unit: 'tasks' as const }
+  const stateOf = (items: readonly DocItem[], isLive = false): SectionId => {
+    const c = countTasks(items.map(asTask))
+    if (c.total > 0 && c.done === c.total) return 'done'
+
+    return isLive || c.done + c.inProgress > 0 ? 'working' : 'waiting'
+  }
+  const filter = (await read($, filters))[pane] ?? 'all'
+  const isFiltered = filter !== 'all'
+  const fits = (item: DocItem) => !isFiltered || item.status === filter
+  /**
+   * Sections start open unless finished; groups start closed. Under a filter
+   * both start open, on keys of their own. A key in `collapsed` flips the default.
+   */
+  const sectionKey = (sid: string) => (isFiltered ? `df:${pane}:${sid}` : `d:${pane}:${sid}`)
+  const groupKey = (gid: string) => (isFiltered ? `gf:${pane}:${gid}` : `g:${pane}:${gid}`)
+  const sectionOpen = (sid: string, state: SectionId) => (isFiltered || state !== 'done') !== shut.has(sectionKey(sid))
+  const groupOpen = (gid: string) => shut.has(groupKey(gid)) !== isFiltered
+  /** The sections and groups the filter leaves, each with only its matching items. */
+  const shown = doc.sections
+    .map(section => ({
+      section,
+      items: section.items.filter(fits),
+      groups: section.groups.map(g => ({ group: g, items: g.items.filter(fits) })).filter(g => !isFiltered || g.items.length > 0),
+    }))
+    .filter(v => !isFiltered || v.items.length > 0 || v.groups.length > 0)
+  const nothing = `Nothing ${FILTER_ALT[filter]}.`
+  const toggle = async (key: string, open: boolean) => {
+    const at = await $.clock.now()
+    await update($, toggled, list => ({
+      ...Object.fromEntries(Object.entries(list).filter(([, t]) => at - t.at < MOTION_MS)),
+      [key]: { at, open },
+    }))
+    await update($, collapsed, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
+  }
+  const motionOf = (key: string, isOpen: boolean): Motion => {
+    const flip = flips[key]
+
+    return flip && flip.open === isOpen && now - flip.at < MOTION_MS ? (isOpen ? 'open' : 'close') : undefined
+  }
+  const pickBy = (key: string) => update($, selected, cur => (cur === key ? null : key))
+  const picked = pick?.startsWith(`${pane}::`) ? all.find(i => `${pane}::${i.id}` === pick) : undefined
+  const subtitle = doc.error ?? `${doc.file} · updated ${relTime(doc.updatedAt, now) || 'just now'}`
+  const steps = history.flatMap(([t, d], i) => {
+    const prev = history[i - 1]?.[1] ?? d
+
+    return d > prev ? Array.from({ length: Math.min(d - prev, 20) }, () => t) : []
+  })
+
+  const detail = picked && (
+    <Box key="detail" flexDirection="column" borderStyle="round" borderColor={INK.border} paddingX={1} marginBottom={1}>
+      <Box flexDirection="row" gap={1}>
+        <Box flexGrow={1}>
+          <Text bold wrap="truncate-end">
+            {picked.title}
+          </Text>
+        </Box>
+        <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
+      </Box>
+      <Text color={INK.sub}>
+        {picked.status === 'completed' ? 'Done' : picked.status === 'in_progress' ? 'In progress' : 'Not started'}
+      </Text>
+      {picked.detail !== picked.title && <Text wrap="wrap">{picked.detail}</Text>}
+    </Box>
+  )
+
+  if (Svg) {
+    const Art = Svg
+    const strip = (source: string, alt: string, left?: JSX.Element, right?: JSX.Element, cx = 37) => (
+      <Box flexDirection="column">
+        <Art source={source} alt={alt} />
+        {left && (
+          <Box
+            position="absolute"
+            left={0}
+            top={0}
+            bottom={0}
+            width={hitWidth(cx)}
+            alignItems="center"
+            justifyContent="center"
+          >
+            {left}
+          </Box>
+        )}
+        {right && (
+          <Box position="absolute" right={1} top={0} bottom={0} justifyContent="center">
+            {right}
+          </Box>
+        )}
+      </Box>
+    )
+    const more = (id: string) => (
+      <Button key={`item-${pane}::${id}`} plain label="⋯" onPress={() => pickBy(`${pane}::${id}`)} />
+    )
+
+    return (
+      <Box flexDirection="column">
+        <Art source={headerSvg('', subtitle, steps, now, doc.title, DOC_SPAN)} alt={`${doc.title}. ${subtitle}`} />
+        {summaryCard($, els, Art, pane, sum, filter)}
+        {detail}
+        {isFiltered && shown.length === 0 && <Art source={emptyRowSvg(nothing)} alt={nothing} />}
+        {shown.map(({ section, items: ownItems, groups }) => {
+          const items = itemsOf(section)
+          const state = stateOf(items, section.isLive)
+          const key = sectionKey(section.id)
+          const isOpen = sectionOpen(section.id, state)
+          const sectionMotion = motionOf(key, isOpen)
+          const c = countTasks(items.map(asTask))
+          const rows: JSX.Element[] = []
+          if (isOpen) {
+            ownItems.forEach((item, j) =>
+              rows.push(
+                strip(
+                  taskRowSvg(asTask(item), now, {
+                    isLast: groups.length === 0 && j === ownItems.length - 1,
+                    isPicked: pick === `${pane}::${item.id}`,
+                    order: sectionMotion === 'open' ? j : undefined,
+                    when: '',
+                    flat: true,
+                  }),
+                  `${item.title}: ${item.status}`,
+                  undefined,
+                  more(item.id),
+                ),
+              ),
+            )
+            groups.forEach(({ group, items: groupItems }, j) => {
+              const gkey = groupKey(group.id)
+              const gOpen = groupOpen(group.id)
+              const gMotion = motionOf(gkey, gOpen)
+              const isLast = j === groups.length - 1
+              const cat = groupAsCategory(group.id, group.title, group.items, doc.updatedAt, group.isLive)
+              const gc = countTasks(cat.tasks)
+              rows.push(
+                strip(
+                  agentRowSvg(cat, now, {
+                    isLast,
+                    isOpen: gOpen,
+                    motion: gMotion,
+                    order: sectionMotion === 'open' ? ownItems.length + j : undefined,
+                    when: `${gc.percent}%`,
+                  }),
+                  `${group.title}: ${gc.done}/${gc.total}, ${gOpen ? 'expanded' : 'collapsed'}`,
+                  <Button key={`group-${pane}:${group.id}`} plain label={HIT} onPress={() => toggle(gkey, !gOpen)} />,
+                ),
+              )
+              if (gOpen) {
+                groupItems.forEach((item, k) =>
+                  rows.push(
+                    strip(
+                      taskRowSvg(asTask(item), now, {
+                        isLast: isLast && k === groupItems.length - 1,
+                        isPicked: pick === `${pane}::${item.id}`,
+                        order: gMotion === 'open' ? k : undefined,
+                        when: '',
+                      }),
+                      `${item.title}: ${item.status}`,
+                      undefined,
+                      more(item.id),
+                    ),
+                  ),
+                )
+              }
+            })
+            if (items.length === 0) rows.push(<Art source={emptyRowSvg('No checklist items.')} alt="No checklist items." />)
+          }
+
+          return (
+            <Box key={`doc-${pane}-${section.id}`} flexDirection="column" marginBottom={1}>
+              {strip(
+                sectionHeadSvg(state, section.title, `${c.done}/${c.total}`, isOpen, sectionMotion, c),
+                `${section.title}, ${c.done} of ${c.total} done, ${isOpen ? 'expanded' : 'collapsed'}`,
+                <Button key={`head-${pane}:${section.id}`} plain label={HIT} onPress={() => toggle(key, !isOpen)} />,
+                undefined,
+                24,
+              )}
+              {rows}
+            </Box>
+          )
+        })}
+      </Box>
+    )
+  }
+
+  const glyph = (status: string) =>
+    status === 'completed' ? (
+      <Text color={C.green}>☑</Text>
+    ) : status === 'in_progress' ? (
+      <Text color={C.blue}>◐</Text>
+    ) : (
+      <Text color={C.gray}>☐</Text>
+    )
+  const itemRow = (item: DocItem, indent: number) => (
+    <Box key={`row-${pane}-${item.id}`} flexDirection="row" gap={1} paddingLeft={indent}>
+      {glyph(item.status)}
+      <Box flexGrow={1}>
+        <Button
+          key={`item-${pane}::${item.id}`}
+          plain
+          label={item.title}
+          dimColor={item.status === 'completed'}
+          onPress={() => pickBy(`${pane}::${item.id}`)}
+        />
+      </Box>
+    </Box>
+  )
+
+  return (
+    <Box flexDirection="column">
+      <Text bold>{doc.title}</Text>
+      <Text dimColor>{subtitle}</Text>
+      <Box flexDirection="row" gap={1} marginTop={1}>
+        <Text bold>{sum.percent}%</Text>
+        <Text color={C.green}>{bar(sum.percent / 100, 16)}</Text>
+        <Text dimColor>
+          {sum.done}/{sum.total} tasks
+        </Text>
+      </Box>
+      <Box marginBottom={1}>{summaryPillsText($, els, pane, sum, filter)}</Box>
+      {isFiltered && shown.length === 0 && <Text dimColor>{nothing}</Text>}
+      {shown.map(({ section, items: ownItems, groups }) => {
+        const items = itemsOf(section)
+        const state = stateOf(items, section.isLive)
+        const key = sectionKey(section.id)
+        const isOpen = sectionOpen(section.id, state)
+        const c = countTasks(items.map(asTask))
+
+        return (
+          <Box key={`doc-${pane}-${section.id}`} flexDirection="column">
+            <Box flexDirection="row" gap={1}>
+              <Button
+                key={`head-${pane}:${section.id}`}
+                plain
+                label={isOpen ? '▾' : '▸'}
+                onPress={() => toggle(key, !isOpen)}
+              />
+              <Text color={SECTION_DOT[state]}>●</Text>
+              <Box flexGrow={1}>
+                <Text bold wrap="truncate-end">
+                  {section.title}
+                </Text>
+              </Box>
+              <Text dimColor>
+                {c.done}/{c.total}
+              </Text>
+            </Box>
+            {isOpen && ownItems.map(item => itemRow(item, 4))}
+            {isOpen &&
+              groups.map(({ group, items: groupItems }) => {
+                const gkey = groupKey(group.id)
+                const gOpen = groupOpen(group.id)
+                const gc = countTasks(group.items.map(asTask))
+
+                return (
+                  <Box key={`grp-${pane}-${group.id}`} flexDirection="column" paddingLeft={2}>
+                    <Box flexDirection="row" gap={1}>
+                      <Button
+                        key={`group-${pane}:${group.id}`}
+                        plain
+                        label={gOpen ? '▾' : '▸'}
+                        onPress={() => toggle(gkey, !gOpen)}
+                      />
+                      <Box flexGrow={1}>
+                        <Text wrap="truncate-end">{group.title}</Text>
+                      </Box>
+                      <Text color={gc.done === gc.total ? C.green : C.blue}>
+                        {ringGlyph(gc.total ? gc.done / gc.total : 0)}
+                      </Text>
+                      <Text>
+                        {gc.done}/{gc.total}
+                      </Text>
+                    </Box>
+                    {gOpen && groupItems.map(item => itemRow(item, 4))}
+                  </Box>
+                )
+              })}
+          </Box>
+        )
+      })}
+      {detail}
+    </Box>
+  )
+}
 
 export const register: Register = (on, options) => {
-  const name = typeof options.name === 'string' ? options.name.trim() : ''
+  userName = typeof options.name === 'string' ? options.name.trim() : ''
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -416,7 +1201,8 @@ export const register: Register = (on, options) => {
     await syncInit($)
     await loadDocConfig($)
     await refreshDocs($, true)
-    for (const pane of docPanes()) void $.ui.open(pane)
+    await closeOldTabs($)
+    if (docCtx.tabs.length > 0) await autoOpen($)
     $.clock.every(3_000, () => {
       void refreshDocs($)
       void refreshLive($)
@@ -598,702 +1384,24 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  /** The one board pane: its own tabs (Agents, then each project checklist) and the picked tab below them. */
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
-    const { Box, Text, Button } = els
+    const { Box, Text } = els
     const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
-
-    await read($, tick)
-    const now = await $.clock.now()
-    const b = mergePeers(await read($, board), await read($, selfName), await read($, peers))
-    const shut = new Set(await read($, collapsed))
-    const pick = await read($, selected)
-    const sum = summarize(b)
-    const filter = (await read($, filters))[PANE] ?? 'all'
-    const isFiltered = filter !== 'all'
-    /** Under a filter sections and rows start open, so the matching tasks show; their own keys flip that. */
-    const sectionKey = (id: string) => (isFiltered ? `sf:${id}` : `s:${id}`)
-    const foldKey = (id: string) => (isFiltered ? `of:${id}` : `o:${id}`)
-    const isRowOpen = (id: string) => shut.has(foldKey(id)) !== isFiltered
-    const shownSections = grouped(b)
-      .map(section => ({ ...section, categories: section.categories.filter(cat => keepsRow(cat, filter)) }))
-      .filter(section => !isFiltered || section.categories.length > 0)
-
-    const flips = await read($, toggled)
-    /** Flips one section or agent; `open` is the state it lands in, so the turn plays only once the flip is drawn. */
-    const toggle = async (key: string, open: boolean) => {
-      const at = await $.clock.now()
-      await update($, toggled, all => ({
-        ...Object.fromEntries(Object.entries(all).filter(([, t]) => at - t.at < MOTION_MS)),
-        [key]: { at, open },
-      }))
-      await update($, collapsed, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
-    }
-    /** Which way a chevron turns if it was toggled a moment ago; nothing once it has settled. */
-    const motionOf = (key: string, isOpen: boolean): Motion => {
-      const flip = flips[key]
-
-      return flip && flip.open === isOpen && now - flip.at < MOTION_MS ? (isOpen ? 'open' : 'close') : undefined
-    }
-
-    if (Svg) {
-      const Art = Svg
-      const pickBy = (key: string) => update($, selected, cur => (cur === key ? null : key))
-      const sections = shownSections
-      const working = grouped(b).find(s => s.id === 'working')?.categories.length ?? 0
-      const subtitle =
-        working > 0
-          ? 'Working on things! I’ll ping you.'
-          : sum.total > 0 && sum.done === sum.total
-            ? 'All caught up.'
-            : 'Nothing running right now.'
-      const completions = b.categories.flatMap(c => c.tasks.flatMap(t => (t.completedAt ? [t.completedAt] : [])))
-
-      /** One drawn strip with native controls laid over the slots it leaves blank; unkeyed, so it is no hover scope. */
-      const strip = (key: string, source: string, alt: string, left?: JSX.Element, right?: JSX.Element, cx = 37) => (
-        <Box flexDirection="column">
-          <Art source={source} alt={alt} />
-          {left && (
-            <Box
-              position="absolute"
-              left={0}
-              top={0}
-              bottom={0}
-              width={hitWidth(cx)}
-              alignItems="center"
-              justifyContent="center"
-            >
-              {left}
-            </Box>
-          )}
-          {right && (
-            <Box position="absolute" right={1} top={0} bottom={0} justifyContent="center">
-              {right}
-            </Box>
-          )}
-        </Box>
-      )
-
-      const detail = (() => {
-        if (!pick) return null
-        const [catId, taskId] = pick.split('::')
-        const cat = b.categories.find(c => c.id === catId)
-        if (!cat) return null
-        const task = cat.tasks.find(t => t.id === taskId)
-        const c = countTasks(cat.tasks)
-        const end = task?.completedAt ?? (task?.status === 'in_progress' ? now : undefined)
-
-        return (
-          <Box key="detail" flexDirection="column" borderStyle="round" borderColor={INK.border} paddingX={1} marginTop={1}>
-            <Box flexDirection="row" gap={1}>
-              <Box flexGrow={1}>
-                <Text bold color={INK.text} wrap="truncate-end">
-                  {task ? task.title : cat.title}
-                </Text>
-              </Box>
-              <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
-            </Box>
-            {task ? (
-              <Box flexDirection="column">
-                <Text color={INK.sub}>
-                  {task.status === 'completed' ? 'Done' : task.status === 'in_progress' ? 'In progress' : 'Not started'} · in{' '}
-                  {cat.title}
-                </Text>
-                {task.activeForm && task.activeForm !== task.title && <Text color={INK.sub}>Step: {task.activeForm}</Text>}
-                {task.description && <Text wrap="wrap">{task.description}</Text>}
-                <Text color={INK.sub}>
-                  Created {clock(task.createdAt)} · Started {clock(task.startedAt)} · Finished {clock(task.completedAt)}
-                </Text>
-                <Text color={INK.sub}>Time spent {duration(task.startedAt, end)}</Text>
-              </Box>
-            ) : (
-              <Box flexDirection="column">
-                <Text color={INK.sub}>{[cat.agentType, cat.note].filter(Boolean).join(' · ') || cat.kind}</Text>
-                <Text color={INK.sub}>
-                  {c.done}/{c.total} tasks · started {clock(cat.startedAt)} · last change {clock(cat.updatedAt)}
-                </Text>
-                <Text color={INK.sub}>{currentStep(cat)}</Text>
-              </Box>
-            )}
-          </Box>
-        )
-      })()
-
-      return (
-        <Box flexDirection="column">
-          <Art source={headerSvg(name, subtitle, completions, now)} alt={`Welcome back${name ? `, ${name}` : ''}. ${subtitle}`} />
-          {summaryCard($, els, Art, PANE, sum, filter)}
-          {detail}
-          {isFiltered && sections.length === 0 && (
-            <Art source={emptyRowSvg(`Nothing ${FILTER_ALT[filter]}.`)} alt={`Nothing ${FILTER_ALT[filter]}.`} />
-          )}
-          {sections.map(section => {
-            const key = sectionKey(section.id)
-            const isOpen = !shut.has(key)
-            const count = section.categories.length
-            const sectionMotion = motionOf(key, isOpen)
-
-            return (
-              <Box key={`sec-${section.id}`} flexDirection="column" marginBottom={1}>
-                {strip(
-                  `head-row-${section.id}`,
-                  sectionHeadSvg(section.id, section.title, count, isOpen, sectionMotion, sectionProgress(section.categories)),
-                  `${section.title}, ${count}, ${isOpen ? 'expanded' : 'collapsed'}`,
-                  <Button key={`head-${section.id}`} plain label={HIT} onPress={() => toggle(key, !isOpen)} />,
-                  undefined,
-                  24,
-                )}
-                {isOpen && count === 0 && (
-                  <Art source={emptyRowSvg(section.empty, { order: sectionMotion ? 0 : undefined })} alt={section.empty} />
-                )}
-                {isOpen &&
-                  section.categories.flatMap((cat, i) => {
-                    const fold = foldKey(cat.id)
-                    const isExpanded = isRowOpen(cat.id)
-                    const tasksShown = tasksFor(cat, filter)
-                    const isLast = i === count - 1
-                    const foldMotion = motionOf(fold, isExpanded)
-                    const row = strip(
-                      `agent-${cat.id}`,
-                      agentRowSvg(cat, now, {
-                        isLast,
-                        isOpen: isExpanded,
-                        motion: foldMotion,
-                        order: sectionMotion === 'open' ? i : undefined,
-                      }),
-                      `${cat.title}: ${currentStep(cat)}, ${isExpanded ? 'expanded' : 'collapsed'}`,
-                      <Button key={`fold-${cat.id}`} plain label={HIT} onPress={() => toggle(fold, !isExpanded)} />,
-                      <Button key={`more-${cat.id}`} plain label="⋯" onPress={() => pickBy(`${cat.id}::`)} />,
-                    )
-                    if (!isExpanded) return [row]
-                    const reveal = foldMotion === 'open'
-                    if (tasksShown.length === 0) {
-                      if (isFiltered) return [row]
-
-                      return [
-                        row,
-                        <Art
-                          key={`none-${cat.id}`}
-                          source={emptyRowSvg('No tasks yet.', { isLast, indent: 121, order: reveal ? 0 : undefined })}
-                          alt="No tasks yet."
-                        />,
-                      ]
-                    }
-                    const tasks = tasksShown.map((task, j) =>
-                      strip(
-                        `row-${cat.id}::${task.id}`,
-                        taskRowSvg(task, now, {
-                          isLast: isLast && j === tasksShown.length - 1,
-                          isPicked: pick === `${cat.id}::${task.id}`,
-                          order: reveal ? j : undefined,
-                        }),
-                        `${task.title}: ${task.status}`,
-                        undefined,
-                        <Button key={`task-${cat.id}::${task.id}`} plain label="⋯" onPress={() => pickBy(`${cat.id}::${task.id}`)} />,
-                      ),
-                    )
-
-                    return [row, ...tasks]
-                  })}
-              </Box>
-            )
-          })}
-        </Box>
-      )
-    }
-
-    const ring = (fraction: number, color: string) => <Text color={color}>{ringGlyph(fraction)}</Text>
-
-    const chip = (task: Task) => {
-      const [label, color] =
-        task.status === 'completed'
-          ? ['Done', C.green]
-          : task.status === 'in_progress'
-            ? ['In progress', C.blue]
-            : ['Not started', C.gray]
-
-      return <Text color={color}>{label}</Text>
-    }
-
-    const glyph = (task: Task) =>
-      task.status === 'completed' ? (
-        <Text color={C.green}>✓</Text>
-      ) : task.status === 'in_progress' ? (
-        <Text color={C.blue}>◐</Text>
-      ) : (
-        <Text color={C.gray}>○</Text>
-      )
-
-    const summary = (
-      <Box flexDirection="column" marginBottom={1}>
-        <Box flexDirection="row" gap={1}>
-          <Text bold>{sum.percent}%</Text>
-          <Text color={C.green}>{bar(sum.percent / 100, 16)}</Text>
-          <Text dimColor>
-            {sum.done}/{sum.total} {sum.unit}
-          </Text>
-        </Box>
-        {summaryPillsText($, els, PANE, sum, filter)}
-      </Box>
-    )
-
-    const taskRow = (cat: Category, task: Task) => {
-      const key = `${cat.id}::${task.id}`
-      const isPicked = pick === key
-      const when = task.status === 'completed' ? task.completedAt : (task.startedAt ?? task.createdAt)
-
-      return (
-        <Box key={`row-${key}`} flexDirection="row" gap={1} paddingLeft={4}>
-          {glyph(task)}
-          <Box flexGrow={1}>
-            <Button
-              key={`task-${key}`}
-              plain
-              label={task.title}
-              dimColor={task.status === 'completed' && !isPicked}
-              onPress={() => update($, selected, cur => (cur === key ? null : key))}
-            />
-          </Box>
-          {chip(task)}
-          <Text dimColor>{relTime(when, now)}</Text>
-        </Box>
-      )
-    }
-
-    const agentRow = (cat: Category) => {
-      const c = countTasks(cat.tasks)
-      const key = foldKey(cat.id)
-      const isOpen = isRowOpen(cat.id)
-      const live = cat.isLive && !cat.isFinished
-      const color = c.total > 0 && c.done === c.total ? C.green : C.blue
-
-      return (
-        <Box key={`agent-${cat.id}`} flexDirection="column">
-          <Box flexDirection="row" gap={1}>
-            <Button key={`fold-${cat.id}`} plain label={isOpen ? '▾' : '▸'} onPress={() => toggle(key, !isOpen)} />
-            <Text color={rowCheck(cat) === 'empty' ? INK.box : INK.check}>
-              {rowCheck(cat) === 'done' ? '☑' : rowCheck(cat) === 'mixed' ? '⊟' : '☐'}
-            </Text>
-            <Box flexGrow={1}>
-              <Text wrap="truncate-end">
-                {cat.title}
-                {live ? <Text color={C.green}> ●</Text> : ''}
-              </Text>
-            </Box>
-            <Box flexDirection="row" gap={1}>
-              {ring(c.total === 0 ? 0 : c.done / c.total, color)}
-              <Text>
-                {c.done}/{c.total}
-              </Text>
-              <Text dimColor>{relTime(cat.updatedAt, now) || '—'}</Text>
-              <Button key={`more-${cat.id}`} plain label="⋯" onPress={() => update($, selected, cur => (cur === `${cat.id}::` ? null : `${cat.id}::`))} />
-            </Box>
-          </Box>
-          <Box paddingLeft={6}>
-            <Text dimColor wrap="truncate-end">
-              {cat.agentType && cat.kind === 'agent' ? `${cat.agentType} · ` : ''}
-              {currentStep(cat)}
-            </Text>
-          </Box>
-          {isOpen && tasksFor(cat, filter).map(task => taskRow(cat, task))}
-        </Box>
-      )
-    }
-
-    const sections = shownSections.map(section => {
-      const key = sectionKey(section.id)
-      const isOpen = !shut.has(key)
-
-      return (
-        <Box key={`sec-${section.id}`} flexDirection="column" marginBottom={1}>
-          <Box flexDirection="row" gap={1}>
-            <Button key={`head-${section.id}`} plain label={isOpen ? '▾' : '▸'} onPress={() => toggle(key, !isOpen)} />
-            <Text color={SECTION_DOT[section.id]}>●</Text>
-            <Text bold>{section.title}</Text>
-            <Text dimColor>{section.categories.length}</Text>
-          </Box>
-          {isOpen && section.categories.length === 0 && (
-            <Box paddingLeft={2}>
-              <Text dimColor>{section.empty}</Text>
-            </Box>
-          )}
-          {isOpen && section.categories.map(agentRow)}
-        </Box>
-      )
-    })
-
-    const detail = (() => {
-      if (!pick) return null
-      const [catId, taskId] = pick.split('::')
-      const cat = b.categories.find(c => c.id === catId)
-      const task = cat?.tasks.find(t => t.id === taskId)
-      if (!cat) return null
-      if (!task) {
-        const c = countTasks(cat.tasks)
-
-        return (
-          <Box key="detail" flexDirection="column" borderStyle="round" borderColor={C.gray} paddingX={1}>
-            <Box flexDirection="row" gap={1}>
-              <Box flexGrow={1}>
-                <Text bold wrap="truncate-end">
-                  {cat.title}
-                </Text>
-              </Box>
-              <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
-            </Box>
-            <Text dimColor>{[cat.agentType, cat.note].filter(Boolean).join(' · ') || cat.kind}</Text>
-            <Text dimColor>
-              {c.done}/{c.total} tasks · started {clock(cat.startedAt)} · last change {clock(cat.updatedAt)}
-            </Text>
-          </Box>
-        )
-      }
-      const end = task.completedAt ?? (task.status === 'in_progress' ? now : undefined)
-
-      return (
-        <Box
-          key="detail"
-          flexDirection="column"
-          borderStyle="round"
-          borderColor={C.gray}
-          paddingX={1}
-        >
-          <Box flexDirection="row" gap={1}>
-            <Box flexGrow={1}>
-              <Text bold wrap="truncate-end">
-                {task.title}
-              </Text>
-            </Box>
-            <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
-          </Box>
-          <Box flexDirection="row" gap={1}>
-            {chip(task)}
-            <Text dimColor>in {cat.title}</Text>
-          </Box>
-          {task.activeForm && task.activeForm !== task.title && <Text dimColor>Step: {task.activeForm}</Text>}
-          {task.description && <Text wrap="wrap">{task.description}</Text>}
-          <Text dimColor>
-            Created {clock(task.createdAt)} · Started {clock(task.startedAt)} · Finished {clock(task.completedAt)}
-          </Text>
-          <Text dimColor>Time spent {duration(task.startedAt, end)}</Text>
-        </Box>
-      )
-    })()
+    const tabs = await tabList($)
+    const picked = await read($, view)
+    const active = tabs.find(t => t.id === picked) ?? tabs[0]!
+    const body =
+      active.id === PANE
+        ? await drawAgents($, e)
+        : ((await drawDoc($, e, active.id)) ?? <Text dimColor>Loading {active.title}…</Text>)
+    if (tabs.length < 2) return body
 
     return (
       <Box flexDirection="column">
-        {summary}
-        {b.categories.length === 0 ? (
-          <Text dimColor>No agents have a todo list yet. They show up here as soon as one does.</Text>
-        ) : isFiltered && sections.length === 0 ? (
-          <Text dimColor>Nothing {FILTER_ALT[filter]}.</Text>
-        ) : (
-          sections
-        )}
-        {detail}
-      </Box>
-    )
-  })
-
-  /** A project tab: one checklist file in the board's design. */
-  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
-    const raw = (await read($, docs))[e.requestId]
-    if (!raw) return next(e)
-    const doc = applyLive(raw, await read($, liveWork))
-    const pane = e.requestId
-    const els = $.ui.resolve(e)
-    const { Box, Text, Button } = els
-    const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
-
-    await read($, tick)
-    const now = await $.clock.now()
-    const shut = new Set(await read($, collapsed))
-    const flips = await read($, toggled)
-    const pick = await read($, selected)
-    const history = (await read($, docHistory))[pane] ?? []
-
-    const all = doc.sections.flatMap(itemsOf)
-    const asTask = itemAsTask(doc.updatedAt)
-    const sum = { ...countTasks(all.map(asTask)), unit: 'tasks' as const }
-    const stateOf = (items: readonly DocItem[], isLive = false): SectionId => {
-      const c = countTasks(items.map(asTask))
-      if (c.total > 0 && c.done === c.total) return 'done'
-
-      return isLive || c.done + c.inProgress > 0 ? 'working' : 'waiting'
-    }
-    const filter = (await read($, filters))[pane] ?? 'all'
-    const isFiltered = filter !== 'all'
-    const fits = (item: DocItem) => !isFiltered || item.status === filter
-    /**
-     * Sections start open unless finished; groups start closed. Under a filter
-     * both start open, on keys of their own. A key in `collapsed` flips the default.
-     */
-    const sectionKey = (sid: string) => (isFiltered ? `df:${pane}:${sid}` : `d:${pane}:${sid}`)
-    const groupKey = (gid: string) => (isFiltered ? `gf:${pane}:${gid}` : `g:${pane}:${gid}`)
-    const sectionOpen = (sid: string, state: SectionId) => (isFiltered || state !== 'done') !== shut.has(sectionKey(sid))
-    const groupOpen = (gid: string) => shut.has(groupKey(gid)) !== isFiltered
-    /** The sections and groups the filter leaves, each with only its matching items. */
-    const shown = doc.sections
-      .map(section => ({
-        section,
-        items: section.items.filter(fits),
-        groups: section.groups.map(g => ({ group: g, items: g.items.filter(fits) })).filter(g => !isFiltered || g.items.length > 0),
-      }))
-      .filter(v => !isFiltered || v.items.length > 0 || v.groups.length > 0)
-    const nothing = `Nothing ${FILTER_ALT[filter]}.`
-    const toggle = async (key: string, open: boolean) => {
-      const at = await $.clock.now()
-      await update($, toggled, list => ({
-        ...Object.fromEntries(Object.entries(list).filter(([, t]) => at - t.at < MOTION_MS)),
-        [key]: { at, open },
-      }))
-      await update($, collapsed, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
-    }
-    const motionOf = (key: string, isOpen: boolean): Motion => {
-      const flip = flips[key]
-
-      return flip && flip.open === isOpen && now - flip.at < MOTION_MS ? (isOpen ? 'open' : 'close') : undefined
-    }
-    const pickBy = (key: string) => update($, selected, cur => (cur === key ? null : key))
-    const picked = pick?.startsWith(`${pane}::`) ? all.find(i => `${pane}::${i.id}` === pick) : undefined
-    const subtitle = doc.error ?? `${doc.file} · updated ${relTime(doc.updatedAt, now) || 'just now'}`
-    const steps = history.flatMap(([t, d], i) => {
-      const prev = history[i - 1]?.[1] ?? d
-
-      return d > prev ? Array.from({ length: Math.min(d - prev, 20) }, () => t) : []
-    })
-
-    const detail = picked && (
-      <Box key="detail" flexDirection="column" borderStyle="round" borderColor={INK.border} paddingX={1} marginBottom={1}>
-        <Box flexDirection="row" gap={1}>
-          <Box flexGrow={1}>
-            <Text bold wrap="truncate-end">
-              {picked.title}
-            </Text>
-          </Box>
-          <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
-        </Box>
-        <Text color={INK.sub}>
-          {picked.status === 'completed' ? 'Done' : picked.status === 'in_progress' ? 'In progress' : 'Not started'}
-        </Text>
-        {picked.detail !== picked.title && <Text wrap="wrap">{picked.detail}</Text>}
-      </Box>
-    )
-
-    if (Svg) {
-      const Art = Svg
-      const strip = (source: string, alt: string, left?: JSX.Element, right?: JSX.Element, cx = 37) => (
-        <Box flexDirection="column">
-          <Art source={source} alt={alt} />
-          {left && (
-            <Box
-              position="absolute"
-              left={0}
-              top={0}
-              bottom={0}
-              width={hitWidth(cx)}
-              alignItems="center"
-              justifyContent="center"
-            >
-              {left}
-            </Box>
-          )}
-          {right && (
-            <Box position="absolute" right={1} top={0} bottom={0} justifyContent="center">
-              {right}
-            </Box>
-          )}
-        </Box>
-      )
-      const more = (id: string) => (
-        <Button key={`item-${pane}::${id}`} plain label="⋯" onPress={() => pickBy(`${pane}::${id}`)} />
-      )
-
-      return (
-        <Box flexDirection="column">
-          <Art source={headerSvg('', subtitle, steps, now, doc.title, DOC_SPAN)} alt={`${doc.title}. ${subtitle}`} />
-          {summaryCard($, els, Art, pane, sum, filter)}
-          {detail}
-          {isFiltered && shown.length === 0 && <Art source={emptyRowSvg(nothing)} alt={nothing} />}
-          {shown.map(({ section, items: ownItems, groups }) => {
-            const items = itemsOf(section)
-            const state = stateOf(items, section.isLive)
-            const key = sectionKey(section.id)
-            const isOpen = sectionOpen(section.id, state)
-            const sectionMotion = motionOf(key, isOpen)
-            const c = countTasks(items.map(asTask))
-            const rows: JSX.Element[] = []
-            if (isOpen) {
-              ownItems.forEach((item, j) =>
-                rows.push(
-                  strip(
-                    taskRowSvg(asTask(item), now, {
-                      isLast: groups.length === 0 && j === ownItems.length - 1,
-                      isPicked: pick === `${pane}::${item.id}`,
-                      order: sectionMotion === 'open' ? j : undefined,
-                      when: '',
-                      flat: true,
-                    }),
-                    `${item.title}: ${item.status}`,
-                    undefined,
-                    more(item.id),
-                  ),
-                ),
-              )
-              groups.forEach(({ group, items: groupItems }, j) => {
-                const gkey = groupKey(group.id)
-                const gOpen = groupOpen(group.id)
-                const gMotion = motionOf(gkey, gOpen)
-                const isLast = j === groups.length - 1
-                const cat = groupAsCategory(group.id, group.title, group.items, doc.updatedAt, group.isLive)
-                const gc = countTasks(cat.tasks)
-                rows.push(
-                  strip(
-                    agentRowSvg(cat, now, {
-                      isLast,
-                      isOpen: gOpen,
-                      motion: gMotion,
-                      order: sectionMotion === 'open' ? ownItems.length + j : undefined,
-                      when: `${gc.percent}%`,
-                    }),
-                    `${group.title}: ${gc.done}/${gc.total}, ${gOpen ? 'expanded' : 'collapsed'}`,
-                    <Button key={`group-${pane}:${group.id}`} plain label={HIT} onPress={() => toggle(gkey, !gOpen)} />,
-                  ),
-                )
-                if (gOpen) {
-                  groupItems.forEach((item, k) =>
-                    rows.push(
-                      strip(
-                        taskRowSvg(asTask(item), now, {
-                          isLast: isLast && k === groupItems.length - 1,
-                          isPicked: pick === `${pane}::${item.id}`,
-                          order: gMotion === 'open' ? k : undefined,
-                          when: '',
-                        }),
-                        `${item.title}: ${item.status}`,
-                        undefined,
-                        more(item.id),
-                      ),
-                    ),
-                  )
-                }
-              })
-              if (items.length === 0) rows.push(<Art source={emptyRowSvg('No checklist items.')} alt="No checklist items." />)
-            }
-
-            return (
-              <Box key={`doc-${pane}-${section.id}`} flexDirection="column" marginBottom={1}>
-                {strip(
-                  sectionHeadSvg(state, section.title, `${c.done}/${c.total}`, isOpen, sectionMotion, c),
-                  `${section.title}, ${c.done} of ${c.total} done, ${isOpen ? 'expanded' : 'collapsed'}`,
-                  <Button key={`head-${pane}:${section.id}`} plain label={HIT} onPress={() => toggle(key, !isOpen)} />,
-                  undefined,
-                  24,
-                )}
-                {rows}
-              </Box>
-            )
-          })}
-        </Box>
-      )
-    }
-
-    const glyph = (status: string) =>
-      status === 'completed' ? (
-        <Text color={C.green}>☑</Text>
-      ) : status === 'in_progress' ? (
-        <Text color={C.blue}>◐</Text>
-      ) : (
-        <Text color={C.gray}>☐</Text>
-      )
-    const itemRow = (item: DocItem, indent: number) => (
-      <Box key={`row-${pane}-${item.id}`} flexDirection="row" gap={1} paddingLeft={indent}>
-        {glyph(item.status)}
-        <Box flexGrow={1}>
-          <Button
-            key={`item-${pane}::${item.id}`}
-            plain
-            label={item.title}
-            dimColor={item.status === 'completed'}
-            onPress={() => pickBy(`${pane}::${item.id}`)}
-          />
-        </Box>
-      </Box>
-    )
-
-    return (
-      <Box flexDirection="column">
-        <Text bold>{doc.title}</Text>
-        <Text dimColor>{subtitle}</Text>
-        <Box flexDirection="row" gap={1} marginTop={1}>
-          <Text bold>{sum.percent}%</Text>
-          <Text color={C.green}>{bar(sum.percent / 100, 16)}</Text>
-          <Text dimColor>
-            {sum.done}/{sum.total} tasks
-          </Text>
-        </Box>
-        <Box marginBottom={1}>{summaryPillsText($, els, pane, sum, filter)}</Box>
-        {isFiltered && shown.length === 0 && <Text dimColor>{nothing}</Text>}
-        {shown.map(({ section, items: ownItems, groups }) => {
-          const items = itemsOf(section)
-          const state = stateOf(items, section.isLive)
-          const key = sectionKey(section.id)
-          const isOpen = sectionOpen(section.id, state)
-          const c = countTasks(items.map(asTask))
-
-          return (
-            <Box key={`doc-${pane}-${section.id}`} flexDirection="column">
-              <Box flexDirection="row" gap={1}>
-                <Button
-                  key={`head-${pane}:${section.id}`}
-                  plain
-                  label={isOpen ? '▾' : '▸'}
-                  onPress={() => toggle(key, !isOpen)}
-                />
-                <Text color={SECTION_DOT[state]}>●</Text>
-                <Box flexGrow={1}>
-                  <Text bold wrap="truncate-end">
-                    {section.title}
-                  </Text>
-                </Box>
-                <Text dimColor>
-                  {c.done}/{c.total}
-                </Text>
-              </Box>
-              {isOpen && ownItems.map(item => itemRow(item, 4))}
-              {isOpen &&
-                groups.map(({ group, items: groupItems }) => {
-                  const gkey = groupKey(group.id)
-                  const gOpen = groupOpen(group.id)
-                  const gc = countTasks(group.items.map(asTask))
-
-                  return (
-                    <Box key={`grp-${pane}-${group.id}`} flexDirection="column" paddingLeft={2}>
-                      <Box flexDirection="row" gap={1}>
-                        <Button
-                          key={`group-${pane}:${group.id}`}
-                          plain
-                          label={gOpen ? '▾' : '▸'}
-                          onPress={() => toggle(gkey, !gOpen)}
-                        />
-                        <Box flexGrow={1}>
-                          <Text wrap="truncate-end">{group.title}</Text>
-                        </Box>
-                        <Text color={gc.done === gc.total ? C.green : C.blue}>
-                          {ringGlyph(gc.total ? gc.done / gc.total : 0)}
-                        </Text>
-                        <Text>
-                          {gc.done}/{gc.total}
-                        </Text>
-                      </Box>
-                      {gOpen && groupItems.map(item => itemRow(item, 4))}
-                    </Box>
-                  )
-                })}
-            </Box>
-          )
-        })}
-        {detail}
+        {Svg ? tabStrip($, els, Svg, tabs, active.id) : tabRowText($, els, tabs, active.id)}
+        {body}
       </Box>
     )
   })

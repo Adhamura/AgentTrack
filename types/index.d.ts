@@ -97,6 +97,8 @@ declare module 'claude-code' {
       liveWork: string[]
       /** Each pane's status filter, picked from the summary's pills: all, or one task status. */
       filter: Record<string, 'all' | TaskStatus>
+      /** The board's shown tab: the pane id, or a project tab's id. */
+      view: string
     }
   }
 }
