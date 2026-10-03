@@ -207,6 +207,17 @@ export const applyLive = (doc: DocBoard, running: readonly string[]): DocBoard =
 
 export const itemsOf = (s: DocSection) => [...s.items, ...s.groups.flatMap(g => g.items)]
 
+/**
+ * What a line says past its name, for its details: the whole line without
+ * the name it starts with; all of it when the name was cut short.
+ */
+export const itemNote = (item: DocItem): string | undefined => {
+  if (item.detail === item.title) return undefined
+  if (item.title.endsWith('…') || !item.detail.startsWith(item.title)) return item.detail
+
+  return item.detail.slice(item.title.length).replace(/^[\s.:;,\u2014\u2013-]+/, '').trim() || undefined
+}
+
 /** A section's part columns: one list for all its groups and lines, in the order they first come, so a column stays put. */
 export const sectionColumns = (s: DocSection) => columnsOf(itemsOf(s))
 

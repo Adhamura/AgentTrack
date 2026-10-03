@@ -110,6 +110,26 @@ const SERIF = `'Tiempos Headline', Georgia, 'Times New Roman', serif`
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
+/**
+ * Which palette the drawings use: the light one when the host's theme is
+ * light, else (`auto`) the light one with the dark one under a
+ * `prefers-color-scheme` rule.
+ */
+export type Scheme = 'light' | 'dark' | 'auto'
+let scheme: Scheme = 'auto'
+
+/**
+ * Sets the palette for the drawings that follow, from the host's theme setting
+ * (`dark`, `light-daltonized`, `auto`…). Only a light theme is taken at its
+ * word: `dark` is also the command line's default, which a light desktop app
+ * may never change, so a dark setting still follows the system's preference.
+ */
+export const useScheme = (theme: unknown) => {
+  scheme = typeof theme === 'string' && /^light/i.test(theme) ? 'light' : 'auto'
+
+  return scheme
+}
+
 const svg = (w: number, h: number, body: string) => {
   const used = new Set<string>()
   for (const m of body.matchAll(/class="([^"]*)"/g)) for (const c of (m[1] ?? '').split(' ')) if (c) used.add(c)
@@ -124,7 +144,7 @@ const svg = (w: number, h: number, body: string) => {
 
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" font-family="${SANS}">` +
-    (dark ? `<style>@media (prefers-color-scheme: dark){${dark}}</style>` : '') +
+    (dark && scheme === 'dark' ? `<style>${dark}</style>` : dark && scheme === 'auto' ? `<style>@media (prefers-color-scheme: dark){${dark}}</style>` : '') +
     body +
     `</svg>`
   )
@@ -193,8 +213,16 @@ const wrapLines = (s: string, px: number, size: number) => {
 
 /* ------------------------------------------------------------------ layout */
 
-/** CSS px per cell of `bodyColumns` on a desktop; a little generous, so a strip fills its slot and is scaled down rather than left short. */
-export const CELL_PX = 8.4
+/**
+ * CSS px per cell of `bodyColumns` on a desktop, set high on purpose: the
+ * engine draws an Svg at its markup's width up to its slot, so a drawing a
+ * little wider than its slot is scaled down to fill it exactly (and the
+ * click targets, laid out in shares of the slot, line up), while one
+ * narrower would end short of it.
+ */
+export const CELL_PX = 9
+/** The widest the board's column gets, in cells: past it the drawings would stop growing. */
+export const maxColumns = () => Math.floor(MAX_W / CELL_PX)
 export const MIN_W = 360
 export const MAX_W = 925
 
@@ -321,11 +349,17 @@ const pie = (cx: number, cy: number, done: number, total: number, r = 5.5) => {
   return base + `<path d="M${cx},${cy} L${cx},${cy - r} A${r},${r} 0 ${share > 0.5 ? 1 : 0} 1 ${x.toFixed(2)},${y.toFixed(2)} Z" ${paint('done')}/>`
 }
 
-/** A part of a line: a small green square with a check when done, an empty square when not, a dash when the line has no such part. */
+/**
+ * A part of a line, never a checkbox (only the status square is one): a bare
+ * green check when done, a small hollow gray circle when not, a dash when
+ * the line has no such part.
+ */
 const facetMark = (cx: number, cy: number, facet: Facet | undefined) =>
   !facet
     ? `<path d="M${cx - 3.5},${cy} L${cx + 3.5},${cy}" ${paint(undefined, 'faint')} stroke-width="1.6" stroke-linecap="round"/>`
-    : checkbox(cx - 6, cy, facet.isDone ? 'completed' : 'pending', 12)
+    : facet.isDone
+      ? `<path d="M${cx - 4.5},${cy + 0.5} L${cx - 1.5},${cy + 3.5} L${cx + 4.5},${cy - 3.5}" ${paint(undefined, 'done')} stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
+      : `<circle cx="${cx}" cy="${cy}" r="3.5" ${paint(undefined, 'pending')} stroke-width="1.4"/>`
 
 /** The ⋯ of a row that opens its details. */
 const moreDots = (lay: Layout, cy: number) => {
@@ -411,29 +445,37 @@ export type TabSpec = { id: string; title: string; percent?: number }
 
 export const TABS_H = 36
 
-/** Where each tab sits on the bar: the click targets laid over them use the same numbers. Percents go first when room runs out, then titles shrink. */
+/**
+ * Where each tab sits: the click targets laid over them use the same numbers.
+ * Percents go first when room runs out; past that the tabs wrap onto more
+ * rows, so every tab stays on screen and reachable.
+ */
 export const tabsLayout = (lay: Layout, tabs: readonly TabSpec[]) => {
   const gap = 4
   const titleW = (t: TabSpec) => Math.ceil(textW(t.title, 13, 600) * SLACK)
   const pctOf = (t: TabSpec) => (t.percent === undefined ? '' : `${t.percent}%`)
-  const widths = (withPct: boolean) => tabs.map(t => 24 + titleW(t) + (withPct && pctOf(t) ? 6 + textW(pctOf(t), 12) : 0))
+  const widths = (withPct: boolean) =>
+    tabs.map(t => Math.min(lay.w, 24 + titleW(t) + (withPct && pctOf(t) ? 6 + Math.ceil(textW(pctOf(t), 12) * SLACK) : 0)))
   const sum = (ws: number[]) => ws.reduce((a, b) => a + b, 0) + gap * Math.max(0, ws.length - 1)
-  let withPct = true
-  let ws = widths(true)
-  if (sum(ws) > lay.w) {
-    withPct = false
-    ws = widths(false)
-  }
-  const over = sum(ws) - lay.w
-  if (over > 0) ws = ws.map(x => Math.max(44, x - over / ws.length))
-  let x = 0
+  const withPct = sum(widths(true)) <= lay.w
+  const ws = widths(withPct)
+  let [x, row] = [0, 0]
 
   return tabs.map((t, i) => {
-    const at = { id: t.id, x, w: ws[i]!, pct: withPct ? pctOf(t) : '' }
-    x += ws[i]! + gap
+    const w = ws[i]!
+    if (x > 0 && x + w > lay.w) [x, row] = [0, row + 1]
+    const at = { id: t.id, x, y: row * TABS_H, w, h: TABS_H, pct: withPct ? pctOf(t) : '' }
+    x += w + gap
 
     return at
   })
+}
+
+/** How tall the tab bar is: one row per line of tabs. */
+export const tabsHeight = (lay: Layout, tabs: readonly TabSpec[]) => {
+  const at = tabsLayout(lay, tabs)
+
+  return (Math.max(0, ...at.map(t => t.y)) / TABS_H + 1) * TABS_H
 }
 
 export const tabsSvg = (lay: Layout, tabs: readonly TabSpec[], active: string) => {
@@ -441,16 +483,16 @@ export const tabsSvg = (lay: Layout, tabs: readonly TabSpec[], active: string) =
 
   return svg(
     lay.w,
-    TABS_H,
+    tabsHeight(lay, tabs),
     tabs
       .map((t, i) => {
-        const { x, w, pct } = at[i]!
+        const { x, y, w, pct } = at[i]!
         const isOn = t.id === active
-        const room = w - 24 - (pct ? 6 + textW(pct, 12) : 0)
+        const room = w - 24 - (pct ? 6 + textW(pct, 12) * SLACK : 0)
 
         return (
-          (isOn ? `<rect x="${x}" y="4" width="${w}" height="28" rx="8" ${paint('seg')}/>` : '') +
-          `<text x="${x + 12}" y="23" font-size="13" font-weight="${isOn ? 600 : 500}" ${paint(isOn ? 'text' : 'sub')}>${esc(fit(t.title, room, 13, 600))}` +
+          (isOn ? `<rect x="${x}" y="${y + 4}" width="${w}" height="28" rx="8" ${paint('seg')}/>` : '') +
+          `<text x="${x + 12}" y="${y + 23}" font-size="13" font-weight="${isOn ? 600 : 500}" ${paint(isOn ? 'text' : 'sub')}>${esc(fit(t.title, room, 13, 600))}` +
           (pct ? `<tspan dx="6" font-size="12" font-weight="400" ${paint('sub')}>${pct}</tspan>` : '') +
           `</text>`
         )
@@ -476,9 +518,9 @@ export type SummaryCounts = { total: number; done: number; inProgress: number; n
 const pillSpecs = (c: SummaryCounts, short: boolean) =>
   [
     { id: 'all' as Filter, label: `All ${c.total}`, tone: undefined },
-    { id: 'completed' as Filter, label: `${c.done} done`, tone: 'done' as Tone },
-    { id: 'in_progress' as Filter, label: `${c.inProgress} ${short ? 'active' : 'in progress'}`, tone: 'active' as Tone },
-    { id: 'pending' as Filter, label: `${c.notStarted} ${short ? 'to do' : 'not started'}`, tone: 'pending' as Tone },
+    { id: 'completed' as Filter, label: short ? `${c.done}` : `${c.done} done`, tone: 'done' as Tone },
+    { id: 'in_progress' as Filter, label: short ? `${c.inProgress}` : `${c.inProgress} in progress`, tone: 'active' as Tone },
+    { id: 'pending' as Filter, label: short ? `${c.notStarted}` : `${c.notStarted} not started`, tone: 'pending' as Tone },
   ]
 
 /** Where each option of the scope switch sits, at the card's top right. */
@@ -644,16 +686,16 @@ export const sectionHeadSvg = (
   const share = o.total === 0 ? 0 : o.done / o.total
   const ringEnd = lay.ring.x + lay.ring.w
   const hasCols = o.plan && o.plan.mode !== 'none' && o.columns && o.columns.length > 0
-  const barW = lay.isTiny ? 0 : 72
+  const barW = lay.isTiny || o.total === 0 ? 0 : 72
   const barX = ringEnd - 40 - barW
   const right = hasCols
     ? o.plan!.cells.map(c => countCell(c, o.columns!.find(col => col.key === c.key) ?? { key: c.key, done: 0, total: 0 }, h / 2, o.plan!.mode === 'full')).join('')
     : (barW
         ? `<rect x="${barX}" y="${h / 2 - 2}" width="${barW}" height="4" rx="2" ${paint('track')}/>` +
           (share > 0 ? `<rect x="${barX}" y="${h / 2 - 2}" width="${Math.max(4, share * barW).toFixed(1)}" height="4" rx="2" ${paint(TONE[toneOf(o.done, o.total, true)].fg)}/>` : '')
-        : '') + `<text x="${ringEnd}" y="${h / 2 + 4}" font-size="12" text-anchor="end" ${paint('sub')}>${Math.round(share * 100)}%</text>`
+        : '') + (o.total === 0 ? '' : `<text x="${ringEnd}" y="${h / 2 + 4}" font-size="12" text-anchor="end" ${paint('sub')}>${Math.round(share * 100)}%</text>`)
   const titleEnd = (hasCols ? o.plan!.cells[0]!.x : barW ? barX : ringEnd - 40) - 12
-  const count = `${o.done}/${o.total}`
+  const count = o.total === 0 ? '' : `${o.done}/${o.total}`
   const titleRoom = titleEnd - 46 - textW(count, 12) - 8
 
   return svg(
@@ -713,8 +755,10 @@ export const rowSvg = (
           `<text x="${lay.titleX}" y="44" font-size="12" ${paint('sub')}>${marked(o.sub, end - lay.titleX, 12, o.mark)}</text>` +
           cells.map(c => countCell(c, o.columns!.find(col => col.key === c.key) ?? { key: c.key, done: 0, total: 0 }, 22, o.plan!.mode === 'full')).join('') +
           `<rect x="${lay.ring.x}" y="10" width="${lay.ring.w}" height="24" rx="12" ${paint('pill')}/>` +
-          ring(lay.ring.x + 14, 22, o.done, o.total, o.tone) +
-          `<text x="${lay.ring.x + lay.ring.w - 10}" y="26.3" font-size="12" font-weight="500" text-anchor="end" ${paint('text')}>${counts}</text>` +
+          (o.total === 0
+            ? `<text x="${lay.ring.x + lay.ring.w / 2}" y="26.3" font-size="12" text-anchor="middle" ${paint('pendingText')}>—</text>`
+            : ring(lay.ring.x + 14, 22, o.done, o.total, o.tone) +
+              `<text x="${lay.ring.x + lay.ring.w - 10}" y="26.3" font-size="12" font-weight="500" text-anchor="end" ${paint('text')}>${counts}</text>`) +
           (lay.time && o.when !== undefined
             ? `<rect x="${lay.time.x}" y="10" width="${lay.time.w}" height="24" rx="12" ${paint('pill')}/>` +
               `<text x="${lay.time.x + lay.time.w / 2}" y="26.3" font-size="12" text-anchor="middle" ${paint('pendingText')}>${esc(o.when || '—')}</text>`
@@ -830,3 +874,68 @@ export const noticeH = (lay: Layout, body: string, hasScope: boolean) => {
 
 /** A row's second line: an agent's type, then what it is doing now. */
 export const rowSub = (cat: Category, step: string) => [cat.kind === 'agent' && cat.agentType ? cat.agentType : '', step].filter(Boolean).join(' · ')
+
+/** The inset panel's left edge in a details strip, and the ends of its Close. */
+const DETAIL_IN = 16
+
+/** Where the details strip's Close sits: its click target uses the same numbers. */
+export const detailClose = (lay: Layout) => {
+  const w = Math.ceil(textW('Close', 12, 500) * SLACK) + 20
+
+  return { x: lay.w - DETAIL_IN - 8 - w, y: 10, w, h: 26 }
+}
+
+/** The lines a details strip draws, and its height: what its click targets need. */
+const detailText = (lay: Layout, o: { body?: string; lines: readonly string[] }) => {
+  const room = lay.w - 2 * DETAIL_IN - 28
+  const body = o.body ? wrapLines(o.body, room, 13).slice(0, 8) : []
+  const lines = o.lines.filter(Boolean).flatMap(l => wrapLines(l, room, 12))
+
+  return { body, lines, h: 16 + 22 + 20 + body.length * 19 + lines.length * 17 + 14 }
+}
+
+export const detailH = (lay: Layout, o: { body?: string; lines: readonly string[] }) => detailText(lay, o).h
+
+/**
+ * The details of a picked row or line, drawn inside the card right under it:
+ * the card's sides run past it (closed below when it ends the card) around an
+ * inset panel with the title, a Close, the state, the text and its facts.
+ */
+export const detailSvg = (
+  lay: Layout,
+  o: { title: string; status?: TaskStatus; context?: string; body?: string; lines: readonly string[]; isLast: boolean },
+) => {
+  const { w } = lay
+  const t = detailText(lay, o)
+  const h = t.h
+  const close = detailClose(lay)
+  const x = DETAIL_IN + 12
+  const st = o.status ? STATUS[o.status] : undefined
+  let y = 16 + 22 + 3
+  const meta =
+    (st ? `<tspan ${paint(TONE[st.tone].text)} font-weight="500">${st.label}</tspan>` : '') +
+    (o.context ? `<tspan ${paint('sub')}>${st ? ' · ' : ''}${esc(fit(o.context, w - 2 * x - 90, 12))}</tspan>` : '')
+  const out =
+    frame(w, h, o.isLast, false) +
+    `<rect x="${DETAIL_IN + 0.5}" y="6.5" width="${w - 2 * DETAIL_IN - 1}" height="${h - (o.isLast ? 18 : 13)}" rx="8" ${paint('head', 'border')}/>` +
+    `<text x="${x}" y="${16 + 12}" font-size="14" font-weight="600" ${paint('text')}>${esc(fit(o.title, close.x - x - 12, 14, 600))}</text>` +
+    `<rect x="${close.x}" y="${close.y}" width="${close.w}" height="${close.h}" rx="6" ${paint(undefined, 'border')}/>` +
+    `<text x="${close.x + close.w / 2}" y="${close.y + 17}" font-size="12" font-weight="500" text-anchor="middle" ${paint('text2')}>Close</text>` +
+    (meta ? `<text x="${x}" y="${y + 4}" font-size="12">${meta}</text>` : '') +
+    t.body.map(l => `<text x="${x}" y="${(y += 19) + 4}" font-size="13" ${paint('text')}>${esc(l)}</text>`).join('') +
+    t.lines.map(l => `<text x="${x}" y="${(y += 17) + 4}" font-size="12" ${paint('sub')}>${esc(l)}</text>`).join('')
+
+  return svg(w, h, out)
+}
+
+/** The empty result: a whole card saying so, with a line to press that clears the search and the filter. */
+export const NOTHING_H = 72
+export const NOTHING_LINK_Y = 40
+export const nothingSvg = (lay: Layout, text: string) =>
+  svg(
+    lay.w,
+    NOTHING_H,
+    card(lay.w, NOTHING_H) +
+      `<text x="16" y="28" font-size="13" ${paint('sub')}>${esc(fit(text, lay.w - 32, 13))}</text>` +
+      `<text x="16" y="54" font-size="13" font-weight="500" ${paint('activeText')}>Clear search and filters</text>`,
+  )

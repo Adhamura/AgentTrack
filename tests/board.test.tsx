@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { applyLive, columnCounts, columnsOf, itemsOf, parseDoc, splitFacets, tabPaneId } from '../hooks/docs'
+import { applyLive, columnCounts, columnsOf, itemNote, itemsOf, parseDoc, splitFacets, tabPaneId } from '../hooks/docs'
+import { emptyRowSvg, layout, useScheme } from '../hooks/look'
 import { partial, sameWork } from '../hooks/match'
 import { claudeArgv, compareVersions, findInstalled, installedVersion, lastLine, marketplaceDir, offered, outcomeText, pluginsDirOf, versionOf } from '../hooks/update'
 import { matches, runs, terms } from '../hooks/search'
@@ -70,8 +71,9 @@ describe('board model', () => {
       { sessionId: 's1', name: 'Idle one', cwd: '/x', status: 'idle', isRunning: true, updatedAt: 1000 },
     ])
     const sum = summarize(merged)
-    expect([sum.done, sum.inProgress, sum.notStarted, sum.total, sum.unit]).toEqual([1, 1, 1, 3, 'items'])
-    expect(sum.percent).toBe(33)
+    // A row without a todo list (the idle session) shows a dash, not an item: only tasks count.
+    expect([sum.done, sum.inProgress, sum.notStarted, sum.total, sum.unit]).toEqual([1, 1, 0, 2, 'items'])
+    expect(sum.percent).toBe(50)
     expect(rowCheck(b.categories[0]!)).toBe('mixed')
     b = applyTodoWrite(b, 'main', [{ content: 'A', status: 'completed' }, { content: 'B', status: 'completed' }], 2000)
     expect(rowCheck(b.categories[0]!)).toBe('done')
@@ -613,4 +615,19 @@ test('an empty board shows one empty-state card, not a summary of nothing', asyn
     expect(await ui.find({ key: 'scope-session' })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('the drawings take a light host theme at its word, and follow the system otherwise', async () => {
+  const lay = layout(600)
+  // Dark is also the command line's default, which a light desktop app may never change.
+  expect(useScheme('dark')).toBe('auto')
+  expect(emptyRowSvg(lay, 'x')).toContain('@media (prefers-color-scheme: dark)')
+  expect(useScheme('light-daltonized')).toBe('light')
+  expect(emptyRowSvg(lay, 'x')).not.toContain('<style>')
+  expect(useScheme('auto')).toBe('auto')
+  expect(emptyRowSvg(lay, 'x')).toContain('@media (prefers-color-scheme: dark)')
+  expect(useScheme(undefined)).toBe('auto')
+  // A line's details leave out the name it starts with.
+  expect(itemNote({ id: 'i', title: 'HU.5 — The trail', detail: 'HU.5 — The trail. Tracks and scent.', status: 'pending' })).toBe('Tracks and scent.')
+  expect(itemNote({ id: 'i', title: 'Plain', detail: 'Plain', status: 'pending' })).toBeUndefined()
 })

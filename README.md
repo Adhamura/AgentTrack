@@ -13,7 +13,7 @@ A live progress board for Claude Code. Every session, every subagent and every t
 - **This session, this project, or every session**: the switch at the top right of the Agents summary picks which sessions it shows. **Project** (the default) shows every session working in this project's folder, a folder inside it or one of its worktrees (`.claude/worktrees/`), with each session's running agents, **Session** this one alone, **All** every session on your machine. Each session running Agent Track publishes its board; sessions without it still appear, with their busy or idle state. The choice is remembered for the next session.
 - **Project tabs**: your project's own checklists (a roadmap, an art list, anything in Markdown with `- [ ]` boxes) each get a tab before **Agents** (which is always last), in the same design. The tabs sit at the top of the one board pane; click one to switch. See [Project tabs](#project-tabs).
 
-The desktop app gets the full drawing above. The terminal gets the same layout in text and color.
+The desktop app gets the full drawing above, laid out for the pane's real width (narrow panes drop the time column and part words, never the text size) and in light or dark to match the app. The terminal gets the same layout in text and color.
 
 ## Requirements
 

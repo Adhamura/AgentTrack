@@ -186,21 +186,10 @@ const add = (a: Counts, b: Omit<Counts, 'percent'>) => ({
 })
 
 /**
- * What one row adds to the summary: its tasks, or, for a row with no todo
- * list, the row itself as one item in the state its section shows.
+ * What one row adds to the summary: its tasks. A row with no todo list (an
+ * idle session, an agent that keeps none) adds nothing; it shows a dash.
  */
-export const rowItems = (cat: Category): Omit<Counts, 'percent'> => {
-  if (cat.tasks.length > 0) return countTasks(cat.tasks)
-  if (isBare(cat)) return { total: 0, done: 0, inProgress: 0, notStarted: 0 }
-  const section = sectionOf(cat)
-
-  return {
-    total: 1,
-    done: section === 'done' ? 1 : 0,
-    inProgress: section === 'working' ? 1 : 0,
-    notStarted: section === 'waiting' ? 1 : 0,
-  }
-}
+export const rowItems = (cat: Category): Omit<Counts, 'percent'> => countTasks(cat.tasks)
 
 /**
  * This session's own row before it wrote a todo list: not an item of work

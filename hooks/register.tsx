@@ -35,7 +35,7 @@ import {
   syncAgents,
 } from './board'
 import type { Filter, Scope, SectionId, Summary, TodoItem } from './board'
-import { CONFIG_FILE, applyLive, countsFor, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, sectionColumns, tabPaneId } from './docs'
+import { CONFIG_FILE, applyLive, countsFor, groupAsCategory, itemAsTask, itemNote, itemsOf, parseConfig, parseDoc, sectionColumns, tabPaneId } from './docs'
 import type { DocTab } from './docs'
 import {
   REFRESH_MS,
@@ -58,6 +58,8 @@ import type { ColumnPlan, Layout, Motion, TabSpec, Tone } from './look'
 import {
   EMPTY_H,
   HIT_KEY,
+  NOTHING_H,
+  NOTHING_LINK_Y,
   PILL_H,
   PILL_TOP,
   ROW_H,
@@ -71,8 +73,16 @@ import {
   TABS_H,
   TASK_H,
   TONE_KEY,
+  detailClose,
+  detailH,
+  detailSvg,
   emptyRowSvg,
   headerSvg,
+  maxColumns,
+  nothingSvg,
+  tabsHeight,
+  textW,
+  useScheme,
   layout,
   noticeH,
   noticeSvg,
@@ -124,7 +134,8 @@ let paneColumns = 80
  * drawing's width: figure spaces, which neither wrap nor collapse, a little
  * more than fill that share of the pane, so no edge of the cell is left dead.
  */
-const hit = (share: number) => ' '.repeat(Math.max(3, Math.ceil(paneColumns * share * 1.5)))
+const hit = (share: number) =>
+  '\u2007'.repeat(Math.min(HIT_ROOM - 2, Math.max(3, Math.ceil(Math.min(paneColumns, maxColumns()) * share * 1.5))))
 /**
  * The room, in cells, a click target's Button is laid out in: wider than any
  * pane and centered on the target's cell, so the label always fits whole (a desktop cuts a label
@@ -253,17 +264,21 @@ const tabList = async ($: $): Promise<TabSpec[]> => {
 const tabStrip = ($: $, els: Els, Art: SvgEl, lay: Layout, tabs: readonly TabSpec[], active: string) => {
   if (tabs.length < 2) return null
   const at = tabsLayout(lay, tabs)
+  const height = tabsHeight(lay, tabs)
+  const rows = [...new Set(at.map(t => t.y))]
 
   return (
     <els.Box flexDirection="column">
       <Art source={tabsSvg(lay, tabs, active)} alt={`Tabs: ${tabs.map(t => `${t.title}${t.percent === undefined ? '' : ` ${t.percent}%`}${t.id === active ? ' (shown)' : ''}`).join(', ')}`} />
-      {hitRow(
-        els,
-        lay.w,
-        TABS_H,
-        0,
-        TABS_H,
-        at.map(t => ({ key: `tab-${t.id}`, x: t.x, w: t.w, onPress: () => void update($, view, () => t.id) })),
+      {rows.map(y =>
+        hitRow(
+          els,
+          lay.w,
+          height,
+          y,
+          TABS_H,
+          at.filter(t => t.y === y).map(t => ({ key: `tab-${t.id}`, x: t.x, w: t.w, onPress: () => void update($, view, () => t.id) })),
+        ),
       )}
     </els.Box>
   )
@@ -424,21 +439,27 @@ const markedText = (els: Els, text: string, words: readonly string[], props: Rec
 const nothingText = (filter: Filter, query: string) =>
   query.trim() ? `Nothing matches “${query.trim()}”${filter === 'all' ? '' : ` among ${FILTER_ALT[filter]}`}.` : `Nothing ${FILTER_ALT[filter]}.`
 
-/** The empty result: a whole card saying so, and a button that clears the search and the filter. */
+/** The empty result: a whole card saying so, with a line to press that clears the search and the filter. */
 const nothingCard = ($: $, els: Els, Art: SvgEl | undefined, lay: Layout, pane: string, text: string) => {
   const { Box, Text, Button } = els
+  const clear = () => {
+    void clearSearch($, pane)
+    void update($, filters, all => ({ ...all, [pane]: 'all' as Filter }))
+  }
+  if (!Art) {
+    return (
+      <Box key={`nothing-${pane}`} flexDirection="column" alignItems="flex-start">
+        <Text dimColor>{text}</Text>
+        <Button key={`clear-${pane}`} plain label="Clear search and filters" onPress={clear} />
+      </Box>
+    )
+  }
+  const linkW = Math.ceil(textW('Clear search and filters', 13, 500) * 1.1) + 24
 
   return (
-    <Box key={`nothing-${pane}`} flexDirection="column" alignItems="flex-start" gap={1}>
-      {Art ? <Art source={emptyRowSvg(lay, text, { standalone: true, indent: 16 })} alt={text} /> : <Text dimColor>{text}</Text>}
-      <Button
-        key={`clear-${pane}`}
-        label="Clear search and filters"
-        onPress={() => {
-          void clearSearch($, pane)
-          void update($, filters, all => ({ ...all, [pane]: 'all' as Filter }))
-        }}
-      />
+    <Box key={`nothing-${pane}`} flexDirection="column">
+      <Art source={nothingSvg(lay, text)} alt={`${text} Clear search and filters.`} />
+      {hitRow(els, lay.w, NOTHING_H, NOTHING_LINK_Y, NOTHING_H - NOTHING_LINK_Y - 6, [{ key: `clear-${pane}`, x: 4, w: linkW, onPress: clear }])}
     </Box>
   )
 }
@@ -463,19 +484,39 @@ const motionFor = (flips: Record<string, { at: number; open: boolean }>, now: nu
 /** Picks a row or task for its details, or puts the details away when it is picked already. */
 const pickDetail = ($: $, key: string) => update($, selected, cur => (cur === key ? null : key))
 
+/** What a details box says: its title, its state and where, its text, and lines of facts. */
+type Detail = { title: string; status?: TaskStatus; context?: string; body?: string; lines: readonly string[] }
+
 /**
- * The details of what was picked, drawn right under its row on every surface:
- * its title and a Close, its state, and lines of facts.
+ * The details of what was picked, right under its row: on a desktop drawn
+ * inside the card (its sides run on, and it closes the card when it ends it),
+ * with a click target over its Close; on the terminal a bordered box.
  */
-const detailCard = (
-  $: $,
-  els: Els,
-  o: { title: string; status?: TaskStatus; context?: string; body?: string; lines: readonly string[] },
-) => {
+const detailView = ($: $, els: Els, Art: SvgEl | undefined, lay: Layout, o: Detail, isLast: boolean) => {
+  if (!Art) return detailCard($, els, o)
+  const lines = o.lines.filter(Boolean)
+  const height = detailH(lay, { body: o.body, lines })
+  const close = detailClose(lay)
+
+  return (
+    <els.Box key="detail" flexDirection="column">
+      <Art
+        source={detailSvg(lay, { ...o, lines, isLast })}
+        alt={[o.title, o.status ? STATUS[o.status].label : '', o.context ?? '', o.body ?? '', ...lines].filter(Boolean).join('. ')}
+      />
+      {hitRow(els, lay.w, height, close.y, close.h, [
+        { key: 'detail-close', x: close.x, w: close.w, onPress: () => void update($, selected, () => null) },
+      ])}
+    </els.Box>
+  )
+}
+
+/** The terminal's details box. */
+const detailCard = ($: $, els: Els, o: Detail) => {
   const { Box, Text, Button } = els
 
   return (
-    <Box key="detail" flexDirection="column" borderStyle="round" borderDimColor paddingX={1} marginY={1}>
+    <Box key="detail" flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
       <Box flexDirection="row" gap={1}>
         <Box flexGrow={1} flexShrink={1}>
           <Text bold wrap="truncate-end">
@@ -836,37 +877,42 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
   const toggle = (key: string, open: boolean) => void toggleFold($, key, open)
   const isBlankBoard = isBlank(b) && !isFiltered
   const working = grouped(b).find(s => s.id === 'working')?.categories.length ?? 0
+  const agents = grouped(b).find(s => s.id === 'working')?.categories.filter(c => c.kind === 'agent').length ?? 0
+  const sessions = working - agents
+  /** A status line, not the summary again: who is at work now. */
   const subtitle =
-    working > 0
-      ? `${working} working · ${ofDone(sum.done, sum.total)}`
-      : sum.total > 0 && sum.done === sum.total
-        ? `All caught up · ${ofDone(sum.done, sum.total)}`
-        : sum.total > 0
-          ? `Nothing running · ${ofDone(sum.done, sum.total)}`
-          : 'Nothing running right now'
+    working === 0
+      ? sum.total > 0 && sum.done === sum.total
+        ? 'All caught up'
+        : 'Nothing running right now'
+      : [
+          agents > 0 ? `${agents} ${agents === 1 ? 'agent' : 'agents'} working` : '',
+          sessions > 0 ? `${sessions} ${sessions === 1 ? 'session' : 'sessions'} busy` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ')
   const heading = userName ? `Welcome back, ${userName}.` : 'Welcome back.'
 
   /** The details of a picked row, or of a picked task under it. */
-  const detailOf = (cat: Category, task?: Task) => {
+  const detailOf = (cat: Category, task?: Task): Detail => {
     if (task) {
-      return detailCard($, els, {
+      return {
         title: task.title,
         status: task.status,
         context: `in ${cat.title}`,
         body: task.description,
         lines: [task.activeForm && task.activeForm !== task.title ? `Step: ${task.activeForm}` : '', taskTimes(task, now)],
-      })
+      }
     }
     const c = countTasks(cat.tasks)
 
-    return detailCard($, els, {
+    return {
       title: cat.title,
-      context: [cat.kind === 'agent' ? (cat.agentType ?? 'agent') : 'session', cat.note].filter(Boolean).join(' · '),
+      context: [cat.kind === 'agent' ? (cat.agentType ?? 'Agent') : 'Session', cat.note].filter(Boolean).join(' · '),
       lines: [
-        currentStep(cat),
-        `${ofDone(c.done, c.total)} · started ${ago(cat.startedAt, now) || '—'} · last change ${ago(cat.updatedAt, now) || '—'}`,
+        `${c.total > 0 ? `${ofDone(c.done, c.total)} · ` : 'No todo list · '}started ${ago(cat.startedAt, now) || '—'} · last change ${ago(cat.updatedAt, now) || '—'}`,
       ],
-    })
+    }
   }
 
   if (Svg) {
@@ -928,21 +974,21 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
                 tone: rowTone(cat),
                 isLive: live,
                 isOpen: isExpanded,
-                isLast,
+                isLast: isLast && pick !== `${cat.id}::`,
                 motion: foldMotion,
                 order: sectionMotion === 'open' ? i : undefined,
                 when: relTime(cat.updatedAt, now),
                 hasMore: true,
                 mark: words,
               }),
-              `${cat.title}${live ? ' (live)' : ''}: ${step}. ${ofDone(c.done, c.total)}. ${isExpanded ? 'Expanded' : 'Collapsed'}.`,
+              `${cat.title}${live ? ' (live)' : ''}: ${step}. ${c.total > 0 ? ofDone(c.done, c.total) : 'No todo list'}. ${isExpanded ? 'Expanded' : 'Collapsed'}.`,
               [
                 { key: `fold-${cat.id}`, x: 0, w: lay.more.x, onPress: () => toggle(fold, !isExpanded) },
                 { key: `more-${cat.id}`, x: lay.more.x, w: lay.w - lay.more.x, onPress: () => void pickDetail($, `${cat.id}::`) },
               ],
             ),
           )
-          if (pick === `${cat.id}::`) rows.push(detailOf(cat))
+          if (pick === `${cat.id}::`) rows.push(detailView($, els, Art, lay, detailOf(cat), isLast && !isExpanded))
           if (!isExpanded) return
           const isReveal = foldMotion === 'open'
           if (tasksShown.length === 0) {
@@ -980,7 +1026,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
                 [{ key: `task-${tkey}`, x: 0, w: lay.w, onPress: () => void pickDetail($, tkey) }],
               ),
             )
-            if (pick === tkey) rows.push(detailOf(cat, task))
+            if (pick === tkey) rows.push(detailView($, els, Art, lay, detailOf(cat, task), isLast && j === tasksShown.length - 1))
           })
         })
         if (withShowAll) {
@@ -1052,7 +1098,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
           {showChips && <Text color={TONE_KEY[st.tone]}>{st.label}</Text>}
           <Text dimColor>{(relTime(when, now) || '—').padStart(4)}</Text>
         </Box>
-        {pick === key && detailOf(cat, task)}
+        {pick === key && detailCard($, els, detailOf(cat, task))}
       </Box>
     )
   }
@@ -1075,9 +1121,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
               {live ? <Text color={TONE_KEY.active}> ●</Text> : ''}
             </Text>
           </Box>
-          <Text>
-            {c.done}/{c.total}
-          </Text>
+          <Text dimColor={c.total === 0}>{c.total === 0 ? '—' : `${c.done}/${c.total}`}</Text>
           <Text dimColor>{(relTime(cat.updatedAt, now) || '—').padStart(4)}</Text>
           <Button key={`more-${cat.id}`} plain label="⋯" onPress={() => void pickDetail($, `${cat.id}::`)} />
         </Box>
@@ -1086,7 +1130,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
             {rowSub(cat, currentStep(cat))}
           </Text>
         </Box>
-        {pick === `${cat.id}::` && detailOf(cat)}
+        {pick === `${cat.id}::` && detailCard($, els, detailOf(cat))}
         {isOpen && shownTasks(cat).map(task => taskRow(cat, task))}
       </Box>
     )
@@ -1104,9 +1148,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
           <Button key={`head-${section.id}`} plain label={isOpen ? '▾' : '▸'} onPress={() => toggle(key, !isOpen)} />
           <Text color={TONE_KEY[SECTION_TONE[section.id]]}>●</Text>
           {markedText(els, section.title, words, { bold: true })}
-          <Text dimColor>
-            {prog.done}/{prog.total}
-          </Text>
+          {prog.total > 0 && <Text dimColor>{`${prog.done}/${prog.total}`}</Text>}
         </Box>
         {isOpen && section.categories.length === 0 && (
           <Box paddingLeft={2}>
@@ -1213,17 +1255,16 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
   })
   const itemKey = (item: DocItem) => `${pane}::${item.id}`
   /** The details of a picked line, under it. */
-  const itemDetail = (item: DocItem, where: string) =>
-    detailCard($, els, {
-      title: item.title,
-      status: item.status,
-      context: `in ${where}`,
-      body: item.detail !== item.title ? item.detail : undefined,
-      lines: [
-        item.facets ? `Parts: ${item.facets.map(f => f.label).join(', ')}` : '',
-        item.liveBy ? `In progress: matched to running work “${item.liveBy}”` : '',
-      ],
-    })
+  const itemDetail = (item: DocItem, where: string): Detail => ({
+    title: item.title,
+    status: item.status,
+    context: `in ${where}`,
+    body: item.facets ? undefined : itemNote(item),
+    lines: [
+      item.facets ? `Parts: ${item.facets.map(f => f.label).join(', ')}` : '',
+      item.liveBy ? `In progress: matched to running work “${item.liveBy}”` : '',
+    ],
+  })
   /** Each section's part columns, as one list, and the most lines any of its lists has (what sizes a count). */
   const columnsOfSection = (s: (typeof doc.sections)[number]) => ({
     keys: sectionColumns(s),
@@ -1285,7 +1326,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                   plan,
                 }),
               )
-              if (pick === itemKey(item)) rows.push(itemDetail(item, section.title))
+              if (pick === itemKey(item)) rows.push(detailView($, els, Art, lay, itemDetail(item, section.title), groups.length === 0 && j === ownItems.length - 1))
             })
             groups.forEach(({ group, items: groupItems }, j) => {
               const gkey = groupKey(group.id)
@@ -1330,7 +1371,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
               if (gOpen) {
                 groupItems.forEach((item, k) => {
                   rows.push(itemStrip(item, { isLast: isLast && k === groupItems.length - 1, order: gMotion === 'open' ? k : undefined, plan }))
-                  if (pick === itemKey(item)) rows.push(itemDetail(item, group.title))
+                  if (pick === itemKey(item)) rows.push(detailView($, els, Art, lay, itemDetail(item, group.title), isLast && k === groupItems.length - 1))
                 })
               }
             })
@@ -1406,7 +1447,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
           })}
           {columns.length > 0 && <Box width={tail} />}
         </Box>
-        {pick === itemKey(item) && itemDetail(item, where)}
+        {pick === itemKey(item) && detailCard($, els, itemDetail(item, where))}
       </Box>
     )
   }
@@ -1721,6 +1762,14 @@ export const register: Register = (on, options) => {
   })
 
 
+  /** A new theme redraws the board, so its drawings take the new palette. */
+  on('config.set', { key: 'theme' }, async ($, e, next) => {
+    const set = await next(e)
+    $.ui.invalidate('ui.render')
+
+    return set
+  })
+
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin.kind === 'person') await update($, dismissed, () => true)
     // The board's search fields are drawn anew when it opens again: give them their queries back.
@@ -1781,7 +1830,8 @@ export const register: Register = (on, options) => {
 
     return ran
   })
-  on('tool.call', { tool: 'PowerShell' }, async ($, e, next) => {
+  // PowerShell is a Windows tool this build's type table may not list.
+  on('tool.call', { tool: 'PowerShell' } as unknown as { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
     await reread($, JSON.stringify(e))
 
@@ -1871,9 +1921,19 @@ export const register: Register = (on, options) => {
   })
 }
 
+/** The host's theme setting (`dark`, `light`, `auto`…), when the engine lists it. */
+const hostTheme = async ($: $) => {
+  try {
+    return (await $.config.list()).find(row => row.key === 'theme')?.value
+  } catch {
+    return undefined
+  }
+}
+
 /** The board pane's drawing: the tab bar, and the picked tab below it. */
 const drawBoard = async ($: $, e: RenderInput<'Pane'>) => {
   paneColumns = e.props.bodyColumns
+  if (e.surface !== 'terminal') useScheme(await hostTheme($))
   const els = $.ui.resolve(e)
   const { Box, Text } = els
   const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
@@ -1886,7 +1946,7 @@ const drawBoard = async ($: $, e: RenderInput<'Pane'>) => {
       : ((await drawDoc($, e, active.id)) ?? <Text dimColor>Loading {active.title}…</Text>)
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={Svg ? Math.min(paneColumns, maxColumns()) : undefined}>
       {Svg ? tabStrip($, els, Svg, layout(widthFor(paneColumns)), tabs, active.id) : tabRowText($, els, tabs, active.id)}
       {body}
     </Box>
