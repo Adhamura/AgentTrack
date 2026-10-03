@@ -7,6 +7,7 @@
 import type { Category, Task } from '../types'
 import type { Counts, Filter, SectionId, Summary } from './board'
 import { countTasks, currentStep, relTime, rowCheck, sectionOf } from './board'
+import { runs } from './search'
 
 export const W = 925
 
@@ -38,6 +39,8 @@ export const INK = {
   box: '#b6b8c1',
   chipDoneBg: '#e9f8f0',
   chipDoneText: '#2f9e66',
+  /** The characters a search found: drawn bold in this color. */
+  hit: '#d9480f',
 }
 
 const SANS = `Inter, 'Segoe UI', -apple-system, system-ui, sans-serif`
@@ -52,6 +55,15 @@ export const fit = (s: string, px: number, perChar: number) => {
 
   return s.length <= max ? s : `${s.slice(0, Math.max(1, max - 1)).trimEnd()}…`
 }
+
+/**
+ * A text cut to fit like `fit`, escaped, with the characters the search
+ * `words` found drawn bold in the highlight color.
+ */
+export const marked = (s: string, px: number, perChar: number, words: readonly string[] = []) =>
+  runs(fit(s, px, perChar), words)
+    .map(r => (r.isHit ? `<tspan font-weight="700" fill="${INK.hit}">${esc(r.text)}</tspan>` : esc(r.text)))
+    .join('')
 
 const svg = (h: number, body: string) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${h}" viewBox="0 0 ${W} ${h}" ` +
@@ -241,6 +253,7 @@ export const sectionHeadSvg = (
   isOpen: boolean,
   motion?: Motion,
   progress?: { done: number; total: number },
+  mark?: readonly string[],
 ) => {
   const h = 44
   const r = 10
@@ -254,7 +267,7 @@ export const sectionHeadSvg = (
     `<path d="${path}" fill="${INK.head}"/>` +
       chevron(24, 22, isOpen, motion) +
       `<circle cx="59" cy="22" r="6.5" fill="${SECTION_DOT[id]}"/>` +
-      `<text x="81" y="29" font-size="19" font-weight="500" fill="${INK.text}">${esc(fit(title, progress ? 540 : 650, 10.4))}` +
+      `<text x="81" y="29" font-size="19" font-weight="500" fill="${INK.text}">${marked(title, progress ? 540 : 650, 10.4, mark)}` +
       `<tspan dx="12" font-size="18" font-weight="400" fill="${INK.count}">${count}</tspan></text>` +
       (progress ? sectionBar(progress.done, progress.total, id) : ''),
   )
@@ -334,7 +347,7 @@ const pills = (cy: number, c: Counts, when: string, section: SectionId) =>
 export const agentRowSvg = (
   cat: Category,
   now: number,
-  opts: { isLast: boolean; isOpen: boolean; motion?: Motion; order?: number; when?: string },
+  opts: { isLast: boolean; isOpen: boolean; motion?: Motion; order?: number; when?: string; mark?: readonly string[] },
 ) => {
   const h = 64
   const c = countTasks(cat.tasks)
@@ -346,8 +359,8 @@ export const agentRowSvg = (
       reveal(
         chevron(37, 31, opts.isOpen, opts.motion) +
           checkbox(71, 21, rowCheck(cat)) +
-          `<text x="120" y="29" font-size="18.5" fill="${INK.text}">${esc(fit(cat.title, 570, 9.6))}</text>` +
-          `<text x="120" y="52" font-size="16.5" fill="${INK.sub}">${esc(fit(sub, 560, 8.6))}</text>` +
+          `<text x="120" y="29" font-size="18.5" fill="${INK.text}">${marked(cat.title, 570, 9.6, opts.mark)}</text>` +
+          `<text x="120" y="52" font-size="16.5" fill="${INK.sub}">${marked(sub, 560, 8.6, opts.mark)}</text>` +
           pills(32, c, opts.when ?? relTime(cat.updatedAt, now), sectionOf(cat)),
         opts.order,
       ),
@@ -358,7 +371,7 @@ export const agentRowSvg = (
 export const taskRowSvg = (
   task: Task,
   now: number,
-  opts: { isLast: boolean; isPicked: boolean; order?: number; when?: string; flat?: boolean },
+  opts: { isLast: boolean; isPicked: boolean; order?: number; when?: string; flat?: boolean; mark?: readonly string[] },
 ) => {
   const h = 36
   const [chip, chipBg, chipText] =
@@ -382,7 +395,7 @@ export const taskRowSvg = (
       reveal(
         (opts.isPicked ? `<rect x="64" y="2" width="${W - 84}" height="${h - 4}" rx="6" fill="${INK.blueBg}"/>` : '') +
           checkbox(boxX, 7, box) +
-          `<text x="${textX}" y="25" font-size="18" fill="${isDone ? '#555965' : INK.text}">${esc(fit(task.title, 566 - textX + 120, 8.9))}</text>` +
+          `<text x="${textX}" y="25" font-size="18" fill="${isDone ? '#555965' : INK.text}">${marked(task.title, 566 - textX + 120, 8.9, opts.mark)}</text>` +
           `<rect x="${792 - chipW}" y="4" width="${chipW}" height="28" rx="14" fill="${chipBg}"/>` +
           `<text x="${792 - chipW / 2}" y="24" font-size="16.5" fill="${chipText}" text-anchor="middle">${chip}</text>` +
           `<text x="829" y="25" font-size="18" fill="${INK.grayText}" text-anchor="middle">${esc(time)}</text>`,
