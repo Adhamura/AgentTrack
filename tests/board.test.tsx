@@ -4,7 +4,7 @@ import { applyLive, itemsOf, parseDoc, tabPaneId } from '../hooks/docs'
 import { partial, sameWork } from '../hooks/match'
 import { claudeArgv, compareVersions, findInstalled, installedVersion, lastLine, marketplaceDir, offered, outcomeText, pluginsDirOf, versionOf } from '../hooks/update'
 import { matches, runs, terms } from '../hooks/search'
-import { applyTodoWrite, emptyBoard, grouped, inProject, mergePeers, peerWork, relTime, rowCheck, scopedPeers, summarize } from '../hooks/board'
+import { applyTodoWrite, emptyBoard, grouped, inProject, mergePeers, peerWork, projectKey, relTime, rowCheck, scopedPeers, summarize, syncAgents } from '../hooks/board'
 
 const PANE = { component: 'Pane', requestId: 'agent-track' } as const
 
@@ -511,4 +511,22 @@ test('the switch at the top right shows this session, this project or every sess
     await ui.unmount()
   }
   expect(kept.scope).toBe('session')
+})
+
+test('worktrees of a project count as the project, and running agents get rows without a todo', async () => {
+  expect(projectKey('C:\\Work\\Mewsic\\.claude\\worktrees\\festive-ant')).toBe('c:/work/mewsic')
+  expect(projectKey('\\\\?\\C:\\Work\\Mewsic\\')).toBe('c:/work/mewsic')
+  expect(inProject('C:\\Work\\Mewsic\\.claude\\worktrees\\a', 'C:\\Work\\Mewsic\\.claude\\worktrees\\b')).toBe(true)
+  expect(inProject('/w/Mewsic', '/w/Mewsic/.claude/worktrees/b')).toBe(true)
+  expect(inProject('/w/Other/.claude/worktrees/a', '/w/Mewsic')).toBe(false)
+
+  const listed = [
+    { id: 'a1', description: 'HU.9 Apex beasts', type: 'general-purpose', status: 'running' },
+    { id: 'a2', description: 'Old', type: 'Explore', status: 'completed' },
+  ]
+  const once = syncAgents(emptyBoard(), listed, 10)
+  expect(once.categories.map(c => [c.id, c.title, c.isLive, c.isFinished])).toEqual([['a1', 'HU.9 Apex beasts', true, false]])
+  expect(syncAgents(once, listed, 20)).toBe(once)
+  const done = syncAgents(once, [{ ...listed[0]!, status: 'completed' }], 30)
+  expect(done.categories[0]).toMatchObject({ isLive: false, isFinished: true })
 })

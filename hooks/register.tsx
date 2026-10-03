@@ -27,8 +27,10 @@ import {
   tasksFor,
   SCOPES,
   isScope,
+  inProject,
   peerWork,
   scopedPeers,
+  syncAgents,
 } from './board'
 import type { Filter, Scope, SectionId, Summary, TodoItem } from './board'
 import { CONFIG_FILE, applyLive, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
@@ -492,12 +494,32 @@ const docCtx = { tabs: [] as DocTab[], seen: {} as Record<string, number>, proje
 
 const DOC_SPAN = 7 * 24 * 60 * 60 * 1000
 
-/** This session's project folder: the one it was started in, resolved, else the folder the session registry names. */
-const projectDir = () => docCtx.project || ctx.cwd
+/**
+ * This session's project folder: as the session registry names it (written
+ * the same way as every other session's there), else the one it started in.
+ */
+const projectDir = () => ctx.cwd || docCtx.project
 
 /** The board as the picked scope shows it: this session's rows, and the other sessions' it takes in. */
 const shownBoard = async ($: $) =>
   mergePeers(await read($, board), await read($, selfName), scopedPeers(await read($, scope), await read($, peers), projectDir()))
+
+/** `/agent-track sessions`: every session the sync sees, where it works, and whether the board shows it. */
+const sessionsReport = async ($: $) => {
+  const picked = await read($, scope)
+  const all = await read($, peers)
+  const shown = new Set(scopedPeers(picked, all, projectDir()).map(p => p.sessionId))
+  const lines = all.map(p => {
+    const rows = p.board ? `${p.board.categories.length} rows` : 'no board (Agent Track not loaded there)'
+    const where = inProject(p.cwd, projectDir()) ? 'this project' : 'another project'
+    return `${shown.has(p.sessionId) ? '●' : '○'} ${p.name}: ${p.isRunning ? p.status : 'closed'}, ${where} (${p.cwd || 'no folder'}), ${rows}`
+  })
+
+  return [
+    `Showing: ${SCOPE_LABEL[picked]}. This session: ${projectDir() || 'no folder'}.`,
+    ...(lines.length > 0 ? lines : ['No other sessions found in ' + `${ctx.home}/sessions` + '.']),
+  ].join('\n')
+}
 
 /** Picks the scope, and keeps it for the next session. */
 const pickScope = async ($: $, picked: Scope) => {
@@ -565,7 +587,12 @@ const reread = async ($: $, said: string) => {
 
 /** What runs in this session now: running agents' labels, and the todo items in progress on the board. */
 const refreshLive = async ($: $) => {
-  const agents = (await $.agent.list()).filter(a => a.status === 'running').flatMap(a => [a.description, a.name ?? ''])
+  const listed = await $.agent.list()
+  // Every running agent gets a row, so other sessions see it too: not only the ones that wrote a todo.
+  const now = await $.clock.now()
+  const before = await read($, board)
+  if (syncAgents(before, listed, now) !== before) await update($, board, b => syncAgents(b, listed, now))
+  const agents = listed.filter(a => a.status === 'running').flatMap(a => [a.description, a.name ?? ''])
   const b = await read($, board)
   const todos = b.categories
     .filter(c => !c.isFinished)
@@ -1500,6 +1527,8 @@ export const register: Register = (on, options) => {
     })
     $.clock.every(30_000, () => void update($, tick, n => n + 1))
     await syncInit($)
+    // The session's own row, so it is published (and other sessions list it) before it writes a todo.
+    await ensureLoop($, undefined)
     const kept = await $.store.get(SCOPE_STORE)
     if (isScope(kept)) await update($, scope, () => kept)
     await loadDocConfig($)
@@ -1526,6 +1555,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'agent-track' }, async ($, e) => {
     const arg = e.args.trim()
     if (arg === 'update') return { text: await checkAndReload($) }
+    if (arg === 'sessions') return { text: await sessionsReport($) }
 
     return { text: await toggleBoard($, arg === 'reload') }
   })

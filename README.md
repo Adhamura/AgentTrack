@@ -8,9 +8,9 @@ A live progress board for Claude Code. Every session, every subagent and every t
 
 - **Summary**: overall percent, a progress bar, and how many tasks are completed, in progress and not started. The pills are filters: press one to show only those tasks, or **All** to see everything again.
 - **Sections**: Working, Not started and Done, each with a colored dot, a count, and a chevron that opens and closes it with a short animation.
-- **One row per session or subagent**: its title, what it is doing right now, a progress ring with done/total, and how long ago it last changed. New subagents appear the moment they start.
+- **One row per session or subagent**: its title, what it is doing right now, a progress ring with done/total, and how long ago it last changed. Every running subagent has a row, whether or not it keeps a todo list, and new ones appear within seconds of starting.
 - **Tasks** under each row, from the agent's todo list, with a status chip. The ⋯ button opens a details box with when each task was created, started and finished, and how long it took.
-- **This session, this project, or every session**: the switch at the top right of the board picks which sessions it shows. **Project** (the default) shows every session working in this project's folder or a folder inside it, **Session** this one alone, **All** every session on your machine. Each session running Agent Track publishes its board; sessions without it still appear, with their busy or idle state. The choice is remembered for the next session.
+- **This session, this project, or every session**: the switch at the top right of the board picks which sessions it shows. **Project** (the default) shows every session working in this project's folder, a folder inside it or one of its worktrees (`.claude/worktrees/`), with each session's running agents, **Session** this one alone, **All** every session on your machine. Each session running Agent Track publishes its board; sessions without it still appear, with their busy or idle state. The choice is remembered for the next session.
 - **Project tabs**: your project's own checklists (a roadmap, an art list, anything in Markdown with `- [ ]` boxes) each get a tab before **Agents** (which is always last), in the same design. The tabs sit at the top of the one board pane; click one to switch. See [Project tabs](#project-tabs).
 
 The desktop app gets the full drawing above. The terminal gets the same layout in text and color.
@@ -67,6 +67,7 @@ Settings are read when a session starts, so reopen sessions that were already ru
 - A **▦ Progress** button sits just above the message box with each tab's live percent; press it to show or hide the board. `/agent-track` does the same at any size. (The desktop app may not list it in its suggestions; type the whole command.)
 - **↻ Check updates**, next to it, refreshes the marketplace Agent Track was installed from and updates the plugin when that marketplace has a newer version; `/agent-track update` does the same. After an update it runs `/reload-plugins` itself as soon as Claude is idle, so the new version loads in the same session, and an open board is drawn again by the new version. It runs the `claude` command line, so `claude` must be on your `PATH`.
 - A **search field** under each tab's summary filters the tab as you type and highlights what it found. It searches titles, steps, agent types, task descriptions and checklist details; every word must be found, in any case, and words may span a section, a group and an item (`keys second`). ✕ clears it.
+- `/agent-track sessions` lists every session Agent Track sees: where it works, whether it publishes a board, and whether the board shows it now.
 - Agents that have no built-in todo tool (for example subagents in the desktop app) get one from Agent Track: `mcp__agent-track__todo`. Ask them to use it, or put that in your `CLAUDE.md`, and their tasks show up on the board.
 
 ## Project tabs
