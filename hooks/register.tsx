@@ -57,13 +57,15 @@ const updating = atom({ plugin: 'agent-track', key: 'updating' } as const, false
 
 /** How long after a toggle its drawing still plays the turn. */
 const MOTION_MS = 700
+/** The shown pane's width in cells, as its last drawing read it: what sizes the click targets. */
+let paneColumns = 80
 /**
- * The label of a Button with nothing visible, laid over a drawing: figure
- * spaces (they neither wrap nor collapse), far wider than any cell it sits in
- * and clipped to that cell (`overflow="hidden"`), so every point of the cell,
- * not only its middle, takes the pointer and the press.
+ * The label of a Button with nothing visible, laid over a share (0..1) of a
+ * drawing's width: figure spaces, which neither wrap nor collapse, about as
+ * many as fit in that share of the pane. A label wider than its Button's room
+ * is cut with an ellipsis on a desktop, so it stays a little short of the edge.
  */
-const HIT = '\u2007'.repeat(120)
+const hit = (share: number) => '\u2007'.repeat(Math.max(2, Math.floor(paneColumns * share * 0.85)))
 /** The width, as a share of a drawn strip, that centers a click target on a chevron drawn at `cx` (of 925). */
 const hitWidth = (cx: number) => `${Math.round((2 * cx * 100) / 925)}%`
 /** A section's progress: the summed items of its rows. */
@@ -119,7 +121,7 @@ const hitRow = (
     return [
       <Box key={`gap-${p.key}`} width={`${gap}%`} />,
       <Box key={`spot-${p.key}`} width={`${to - from}%`} overflow="hidden" alignItems="center" justifyContent="center">
-        <Button key={p.key} plain label={HIT} onPress={p.onPress} />
+        <Button key={p.key} plain label={hit(p.w / W)} onPress={p.onPress} />
       </Box>,
     ]
   })
@@ -615,7 +617,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
                 `head-row-${section.id}`,
                 sectionHeadSvg(section.id, section.title, count, isOpen, sectionMotion, sectionProgress(section.categories)),
                 `${section.title}, ${count}, ${isOpen ? 'expanded' : 'collapsed'}`,
-                <Button key={`head-${section.id}`} plain label={HIT} onPress={() => toggle(key, !isOpen)} />,
+                <Button key={`head-${section.id}`} plain label={hit(48 / 925)} onPress={() => toggle(key, !isOpen)} />,
                 undefined,
                 24,
               )}
@@ -638,7 +640,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
                       order: sectionMotion === 'open' ? i : undefined,
                     }),
                     `${cat.title}: ${currentStep(cat)}, ${isExpanded ? 'expanded' : 'collapsed'}`,
-                    <Button key={`fold-${cat.id}`} plain label={HIT} onPress={() => toggle(fold, !isExpanded)} />,
+                    <Button key={`fold-${cat.id}`} plain label={hit(74 / 925)} onPress={() => toggle(fold, !isExpanded)} />,
                     <Button key={`more-${cat.id}`} plain label="⋯" onPress={() => pickBy(`${cat.id}::`)} />,
                   )
                   if (!isExpanded) return [row]
@@ -1033,7 +1035,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                     when: `${gc.percent}%`,
                   }),
                   `${group.title}: ${gc.done}/${gc.total}, ${gOpen ? 'expanded' : 'collapsed'}`,
-                  <Button key={`group-${pane}:${group.id}`} plain label={HIT} onPress={() => toggle(gkey, !gOpen)} />,
+                  <Button key={`group-${pane}:${group.id}`} plain label={hit(74 / 925)} onPress={() => toggle(gkey, !gOpen)} />,
                 ),
               )
               if (gOpen) {
@@ -1062,7 +1064,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
               {strip(
                 sectionHeadSvg(state, section.title, `${c.done}/${c.total}`, isOpen, sectionMotion, c),
                 `${section.title}, ${c.done} of ${c.total} done, ${isOpen ? 'expanded' : 'collapsed'}`,
-                <Button key={`head-${pane}:${section.id}`} plain label={HIT} onPress={() => toggle(key, !isOpen)} />,
+                <Button key={`head-${pane}:${section.id}`} plain label={hit(48 / 925)} onPress={() => toggle(key, !isOpen)} />,
                 undefined,
                 24,
               )}
@@ -1456,6 +1458,7 @@ export const register: Register = (on, options) => {
 
   /** The one board pane: its own tabs (Agents, then each project checklist) and the picked tab below them. */
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    paneColumns = e.props.bodyColumns
     const els = $.ui.resolve(e)
     const { Box, Text } = els
     const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
