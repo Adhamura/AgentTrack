@@ -134,10 +134,13 @@ export const lastLine = (...outs: string[]): string | undefined =>
     .filter(Boolean)
     .pop()
 
-export const outcomeText = (o: UpdateOutcome): string => {
+/** The outcome as one line; `isReloading` when the plugins are being reloaded for it already. */
+export const outcomeText = (o: UpdateOutcome, isReloading = false): string => {
   switch (o.kind) {
     case 'updated':
-      return `Agent Track updated${o.from ? ` from ${o.from}` : ''}${o.to ? ` to ${o.to}` : ''}. Run /reload-plugins or start a new session to use it.`
+      return `Agent Track updated${o.from ? ` from ${o.from}` : ''}${o.to ? ` to ${o.to}` : ''}. ${
+        isReloading ? 'Reloading plugins…' : 'Run /reload-plugins to use it.'
+      }`
     case 'current':
       return `Agent Track is up to date${o.version ? ` (${o.version})` : ''}.`
     case 'local':

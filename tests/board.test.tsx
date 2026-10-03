@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { applyLive, itemsOf, parseDoc, tabPaneId } from '../hooks/docs'
 import { partial, sameWork } from '../hooks/match'
-import { claudeArgv, compareVersions, findInstalled, installedVersion, lastLine, marketplaceDir, offered, pluginsDirOf, versionOf } from '../hooks/update'
+import { claudeArgv, compareVersions, findInstalled, installedVersion, lastLine, marketplaceDir, offered, outcomeText, pluginsDirOf, versionOf } from '../hooks/update'
 import { applyTodoWrite, emptyBoard, grouped, mergePeers, relTime, rowCheck, summarize } from '../hooks/board'
 
 const PANE = { component: 'Pane', requestId: 'agent-track' } as const
@@ -258,6 +258,8 @@ test('updates read what is installed and offered from the plugin files of Claude
     pluginDir: 'C:/Users/k/.claude/plugins/marketplaces/mine',
   })
   expect(versionOf('{"version":"1.3.2"}')).toBe('1.3.2')
+  expect(outcomeText({ kind: 'updated', from: '1.3.3', to: '1.4.0' }, true)).toBe('Agent Track updated from 1.3.3 to 1.4.0. Reloading plugins…')
+  expect(outcomeText({ kind: 'updated', from: '1.3.3', to: '1.4.0' })).toMatch(/Run \/reload-plugins/)
 
   expect(compareVersions('1.10.0', '1.9.9')).toBeGreaterThan(0)
   expect(compareVersions('1.3.1', '1.3.1')).toBe(0)

@@ -1257,25 +1257,55 @@ const checkUpdates = async ($: $): Promise<UpdateOutcome> => {
   }
 }
 
-/** Refreshes the marketplace and updates the plugin from it, once at a time; the outcome as one line. */
-const runCheckUpdates = async ($: $): Promise<string> => {
+/** The built-in command that loads a plugin's new version into the running session. */
+const RELOAD_COMMAND = 'reload-plugins'
+
+/** Refreshes the marketplace and updates the plugin from it, once at a time. */
+const runCheckUpdates = async ($: $): Promise<UpdateOutcome | undefined> => {
   let wasRunning = false
   await update($, updating, cur => {
     wasRunning = cur
 
     return true
   })
-  if (wasRunning) return 'Already checking for updates.'
+  if (wasRunning) return undefined
   try {
-    return outcomeText(await checkUpdates($))
+    return await checkUpdates($)
   } finally {
     await update($, updating, () => false)
   }
 }
 
+/** How `/reload-plugins` answers when it cannot run here (a remote connection, an older build). */
+const RELOAD_REFUSED = /not available|isn't available|unknown|not found|no such/i
+
+/**
+ * Hot-reloads the plugins once an update landed: `/reload-plugins`, queued
+ * to run as soon as the session is idle, so the new version replaces this one
+ * in the same session. When it cannot run, says so and to reload by hand.
+ */
+const reloadAfterUpdate = ($: $, outcome: UpdateOutcome) => {
+  void $.command.run({ command: RELOAD_COMMAND }).then(
+    ran => {
+      if (RELOAD_REFUSED.test(ran.text ?? '')) $.ui.toast(`${outcomeText(outcome)} (${ran.text})`)
+    },
+    () => $.ui.toast(outcomeText(outcome)),
+  )
+}
+
+/** Check updates, from the button or `/agent-track update`: the outcome as one line, and a reload when it updated. */
+const checkAndReload = async ($: $): Promise<string> => {
+  const outcome = await runCheckUpdates($)
+  if (!outcome) return 'Already checking for updates.'
+  if (outcome.kind !== 'updated') return outcomeText(outcome)
+  reloadAfterUpdate($, outcome)
+
+  return outcomeText(outcome, true)
+}
+
 /** The Check updates button: the outcome as a toast. */
 const pressCheckUpdates = async ($: $) => {
-  $.ui.toast(await runCheckUpdates($))
+  $.ui.toast(await checkAndReload($))
 }
 
 export const register: Register = (on, options) => {
@@ -1336,7 +1366,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'agent-track' }, async ($, e) => {
     const arg = e.args.trim()
-    if (arg === 'update') return { text: await runCheckUpdates($) }
+    if (arg === 'update') return { text: await checkAndReload($) }
 
     return { text: await toggleBoard($, arg === 'reload') }
   })
