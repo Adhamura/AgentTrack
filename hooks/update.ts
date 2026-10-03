@@ -17,7 +17,14 @@ export const SCOPES = ['user', 'project', 'local', 'managed']
 
 const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 
-/** The entry this copy of the plugin was installed as: by its folder, or else by name. */
+/** Whether a plugin folder is one Claude Code installed from a marketplace (its plugin cache). */
+const isInstalledCopy = (root: string) => norm(root).includes('/plugins/cache/')
+
+/**
+ * The entry this copy of the plugin was installed as: by its folder, or else
+ * by name when this copy is an installed one; a copy loaded from a folder of
+ * its own (`--plugin-dir`) has none, even when another copy is installed.
+ */
 export const findInstalled = (listJson: string, root: string): Installed | undefined => {
   let list: unknown
   try {
@@ -29,7 +36,9 @@ export const findInstalled = (listJson: string, root: string): Installed | undef
   const all = list.filter((p): p is Installed => !!p && typeof p === 'object' && typeof (p as Installed).id === 'string')
   const mine = all.filter(p => p.id.split('@')[0] === NAME && p.id.includes('@'))
 
-  return mine.find(p => p.installPath && norm(p.installPath) === norm(root)) ?? mine[0]
+  const exact = mine.find(p => p.installPath && norm(p.installPath) === norm(root))
+
+  return exact ?? (isInstalledCopy(root) ? mine[0] : undefined)
 }
 
 /** The last line of the output that parses as a JSON object: where `--json` puts its result. */
@@ -89,3 +98,10 @@ export const runFailure = (err: unknown): UpdateOutcome => {
 
   return { kind: 'failed', reason: /ENOENT|not found|cannot start/i.test(reason) ? 'the claude command is not on PATH' : reason }
 }
+
+/** Whether a plugin folder is a Windows path: there `claude` may be a `.cmd` shim, which runs only through cmd. */
+export const isWindowsPath = (root: string) => /^[a-z]:[\\/]/i.test(root) || root.startsWith('\\\\')
+
+/** The argument vector that runs `claude` with `args` on the platform the plugin folder is on. */
+export const claudeArgv = (root: string, args: readonly string[]): string[] =>
+  isWindowsPath(root) ? ['cmd.exe', '/d', '/s', '/c', 'claude', ...args] : ['claude', ...args]

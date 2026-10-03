@@ -29,7 +29,7 @@ import {
 import type { Filter, SectionId, Summary, TodoItem } from './board'
 import { CONFIG_FILE, applyLive, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
 import type { DocTab } from './docs'
-import { REFRESH_MS, SCOPES, UPDATE_MS, findInstalled, outcomeText, readUpdate, refreshFailure, runFailure } from './update'
+import { REFRESH_MS, SCOPES, UPDATE_MS, claudeArgv, findInstalled, outcomeText, readUpdate, refreshFailure, runFailure } from './update'
 import type { UpdateOutcome } from './update'
 import type { Motion, TabSpec } from './look'
 import { INK, PILL_H, PILL_TOP, SECTION_DOT, SUMMARY_H, TABS_H, W, tabsLayout, tabsSvg, agentRowSvg, emptyRowSvg, headerSvg, sectionHeadSvg, summaryPills, summarySvg, taskRowSvg } from './look'
@@ -1179,17 +1179,18 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
  * from it, through the `claude` command line the person has installed.
  */
 const checkUpdates = async ($: $): Promise<UpdateOutcome> => {
+  const root = $.plugin.root
   try {
-    const listed = await $.process.run(['claude', 'plugin', 'list', '--json'], { timeoutMs: 30_000 })
+    const listed = await $.process.run(claudeArgv(root, ['plugin', 'list', '--json']), { timeoutMs: 30_000 })
     if (listed.exitCode !== 0) return { kind: 'failed', reason: listed.stderr.trim() || 'claude plugin list failed' }
-    const me = findInstalled(listed.stdout, $.plugin.root)
+    const me = findInstalled(listed.stdout, root)
     if (!me) return { kind: 'local' }
     const marketplace = me.id.slice(me.id.indexOf('@') + 1)
-    const refreshed = await $.process.run(['claude', 'plugin', 'marketplace', 'update', marketplace, '--json'], { timeoutMs: REFRESH_MS })
+    const refreshed = await $.process.run(claudeArgv(root, ['plugin', 'marketplace', 'update', marketplace, '--json']), { timeoutMs: REFRESH_MS })
     const failed = refreshFailure(refreshed.stdout, refreshed.stderr, refreshed.exitCode, marketplace)
     if (failed) return { kind: 'failed', reason: failed }
     const scope = me.scope && SCOPES.includes(me.scope) ? ['--scope', me.scope] : []
-    const updated = await $.process.run(['claude', 'plugin', 'update', me.id, '--json', ...scope], { timeoutMs: UPDATE_MS })
+    const updated = await $.process.run(claudeArgv(root, ['plugin', 'update', me.id, '--json', ...scope]), { timeoutMs: UPDATE_MS })
 
     return readUpdate(updated.stdout, updated.exitCode)
   } catch (err) {
@@ -1199,8 +1200,13 @@ const checkUpdates = async ($: $): Promise<UpdateOutcome> => {
 
 /** Refreshes the marketplace and updates the plugin from it, once at a time; the outcome as one line. */
 const runCheckUpdates = async ($: $): Promise<string> => {
-  if (await read($, updating)) return 'Already checking for updates.'
-  await update($, updating, () => true)
+  let wasRunning = false
+  await update($, updating, cur => {
+    wasRunning = cur
+
+    return true
+  })
+  if (wasRunning) return 'Already checking for updates.'
   try {
     return outcomeText(await checkUpdates($))
   } finally {
@@ -1217,6 +1223,8 @@ export const register: Register = (on, options) => {
   userName = typeof options.name === 'string' ? options.name.trim() : ''
 
   on('session.start', async ($, e, next) => {
+    // A check the last load of this module left running ended with it.
+    await update($, updating, () => false)
     await $.command.register({
       name: 'agent-track',
       description: 'Show or hide the live agent progress board',
