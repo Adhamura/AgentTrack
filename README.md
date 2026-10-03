@@ -1,0 +1,126 @@
+# Agent Track
+
+A live progress board for Claude Code. Every session, every subagent and every todo list on one board, updating as the work happens, in both the terminal and the Claude desktop app.
+
+![Agent Track in the Claude desktop app](docs/preview.png)
+
+## What it shows
+
+- **Summary**: overall percent, a progress bar, and how many tasks are completed, in progress and not started.
+- **Sections**: Working, Not started and Done, each with a colored dot, a count, and a chevron that opens and closes it with a short animation.
+- **One row per session or subagent**: its title, what it is doing right now, a progress ring with done/total, and how long ago it last changed. New subagents appear the moment they start.
+- **Tasks** under each row, from the agent's todo list, with a status chip. The ⋯ button opens a details box with when each task was created, started and finished, and how long it took.
+- **Every session on your machine**: each session running Agent Track publishes its board, so any board shows all of them. Sessions without Agent Track still appear, with their busy or idle state.
+- **Project tabs**: your project's own checklists (a roadmap, an art list, anything in Markdown with `- [ ]` boxes) each get a tab beside **Agents**, in the same design. See [Project tabs](#project-tabs).
+
+The desktop app gets the full drawing above. The terminal gets the same layout in text and color.
+
+## Requirements
+
+- Claude Code **2.1.285 or newer**. Agent Track is a *mod*: a plugin made of function hooks, which is an early-access Claude Code feature and may change between releases.
+- Windows, macOS or Linux.
+
+## Install
+
+### From a marketplace (recommended)
+
+If this folder is published as a Git repository (for example on GitHub), anyone can add it as a marketplace and install from it. In Claude Code:
+
+```
+/plugin marketplace add <owner>/<repo>
+/plugin install agent-track@agent-track
+```
+
+A local copy works the same way: unzip the release and point the marketplace at that folder:
+
+```
+/plugin marketplace add C:\path\to\agent-track
+/plugin install agent-track@agent-track
+```
+
+### For one session only
+
+```bash
+claude --plugin-dir /path/to/agent-track
+```
+
+### For every session, including the desktop app
+
+Add the folder to the `env` block of `~/.claude/settings.json`. The second line makes long-running sessions (the desktop app) reload the mod when its files change:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/agent-track",
+    "CLAUDE_CODE_PLUGIN_DIR_WATCH": "1"
+  }
+}
+```
+
+Settings are read when a session starts, so reopen sessions that were already running.
+
+## Use
+
+- The board opens by itself the first time an agent writes a todo list or a subagent starts. In the terminal it opens on its own only in windows at least 144 columns wide.
+- A **▦ Progress** button sits just above the message box with each tab's live percent; press it to show or hide the board. `/agent-track` does the same at any size. (The desktop app may not list it in its suggestions; type the whole command.)
+- Agents that have no built-in todo tool (for example subagents in the desktop app) get one from Agent Track: `mcp__agent-track__todo`. Ask them to use it, or put that in your `CLAUDE.md`, and their tasks show up on the board.
+
+## Project tabs
+
+List the checklist files of a project in `.claude/agent-track.json` in that project's folder. Each one becomes a tab:
+
+```json
+{
+  "tabs": [
+    { "title": "Roadmap", "file": "docs/roadmap.md", "strip": ["\\s*\\(draft\\)"] },
+    { "title": "Art", "file": "docs/art-progress.md", "keepEmptySections": true }
+  ]
+}
+```
+
+How a file is read:
+
+- The `#` heading is the tab's title. Each `##` heading is a section; each `###` under it is a group with its own progress ring.
+- `- [x]` is done, `- [ ]` is not started, and `- [~]`, `- [-]` or `- [/]` is in progress. Nested boxes count too.
+- An item's name is its **bold** part, or its first 70 characters. ⋯ shows the whole line.
+- `strip` removes text matching these regular expressions from every heading. `keepEmptySections` keeps `##` sections that have no boxes.
+- Sections start open unless they are finished; groups start closed. Each section header has its own progress bar.
+- **Live matching**: an open item shows *In progress* while something running in the session names the same work: a running agent's label, or a todo item in progress. It matches by task code (`HU.5`, `W.14`) or when one title covers at least 80% of the other (character-pair similarity, no AI). Done items never change, and nothing is written back to the file.
+
+A tab refreshes by itself when its file changes, whether Claude or you edited it. `/agent-track reload` re-reads the list of tabs.
+
+## Settings
+
+| Setting | What it does | Default |
+| --- | --- | --- |
+| `name` | The name in the greeting: "Welcome back, *name*." | empty ("Welcome back.") |
+
+Change it from Claude Code's config menu, or under `pluginConfigs` in your settings.
+
+## Privacy
+
+Agent Track never sends anything off your machine. To sync sessions it:
+
+- writes each session's board to `~/.claude/agent-track/<session id>.json` (task titles, statuses and times), and
+- reads Claude Code's own list of running sessions in `~/.claude/sessions/` (names, folders, busy/idle).
+
+Boards of closed sessions are ignored after 12 hours. Delete `~/.claude/agent-track/` at any time to clear them.
+
+## Uninstall
+
+`/plugin uninstall agent-track@agent-track`, or remove the folder from `CLAUDE_CODE_PLUGIN_DIRS`. Then delete `~/.claude/agent-track/`.
+
+## Develop
+
+```bash
+claude plugin validate .
+claude plugin test .
+```
+
+To type-check, write the engine's types with `/plugin-types .claude/types` in a Claude Code session, then run `tsc -p .`.
+
+`pack.bat` (Windows) validates, tests and packs a release zip into `dist\`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Made by Kazuki.

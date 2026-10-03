@@ -1,0 +1,1195 @@
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
+
+import type { Category, DocBoard, DocItem, Peer, Snapshot, Task } from '../types'
+import {
+  MAIN,
+  applyTaskCreate,
+  applyTaskUpdate,
+  applyTodoWrite,
+  clock,
+  countTasks,
+  currentStep,
+  duration,
+  emptyBoard,
+  ensureCategory,
+  grouped,
+  mergePeers,
+  hasCategory,
+  relTime,
+  ringGlyph,
+  setLive,
+  summarize,
+  rowCheck,
+  rowItems,
+  bar,
+} from './board'
+import type { SectionId, TodoItem } from './board'
+import { CONFIG_FILE, applyLive, groupAsCategory, itemAsTask, itemsOf, parseConfig, parseDoc, tabPaneId } from './docs'
+import type { DocTab } from './docs'
+import type { Motion } from './look'
+import { INK, SECTION_DOT, agentRowSvg, emptyRowSvg, headerSvg, sectionHeadSvg, summarySvg, taskRowSvg } from './look'
+
+const PANE = 'agent-track'
+const TODO_TOOL = 'mcp__agent-track__todo'
+const TITLE = 'Agents'
+
+const board = atom({ plugin: 'agent-track', key: 'board' } as const, emptyBoard())
+const collapsed = atom({ plugin: 'agent-track', key: 'collapsed' } as const, [] as string[])
+const selected = atom({ plugin: 'agent-track', key: 'selected' } as const, null)
+const tick = atom({ plugin: 'agent-track', key: 'tick' } as const, 0)
+const dismissed = atom({ plugin: 'agent-track', key: 'dismissed' } as const, false)
+const peers = atom({ plugin: 'agent-track', key: 'peers' } as const, [] as Peer[])
+const selfName = atom({ plugin: 'agent-track', key: 'selfName' } as const, '')
+const docs = atom({ plugin: 'agent-track', key: 'docs' } as const, {} as Record<string, DocBoard>)
+const liveWork = atom({ plugin: 'agent-track', key: 'liveWork' } as const, [] as string[])
+const docHistory = atom({ plugin: 'agent-track', key: 'docHistory' } as const, {} as Record<string, [number, number][]>)
+const toggled = atom({ plugin: 'agent-track', key: 'toggled' } as const, {} as Record<string, { at: number; open: boolean }>)
+
+/** How long after a toggle its drawing still plays the turn. */
+const MOTION_MS = 700
+/** A Button with nothing visible: the click target laid over a drawn chevron. */
+const HIT = '  '
+/** The width, as a share of a drawn strip, that centers a click target on a chevron drawn at `cx` (of 925). */
+const hitWidth = (cx: number) => `${Math.round((2 * cx * 100) / 925)}%`
+/** A section's progress: the summed items of its rows. */
+const sectionProgress = (cats: readonly Category[]) =>
+  cats.map(rowItems).reduce((a, b) => ({ done: a.done + b.done, total: a.total + b.total }), { done: 0, total: 0 })
+
+/** How old a closed session's published board may be and still show. */
+const KEEP_MS = 12 * 60 * 60 * 1000
+
+const C = {
+  green: '#3fa66b',
+  amber: '#d49a1f',
+  blue: '#4a8fe7',
+  gray: '#8a8a8a',
+}
+
+type $ = EngineInterface
+type Loose = { tool: string; agentId?: string; [k: string]: unknown }
+
+const isUp = async ($: $) => (await $.ui.panes()).some(p => p.id === PANE)
+
+/** Opens the board unasked the first time there is something to show. */
+const autoOpen = async ($: $) => {
+  if ((await read($, dismissed)) || (await isUp($))) return
+  void $.ui.open({ id: PANE, title: TITLE })
+}
+
+/** Makes sure the loop the event ran in has a category, named from the agent list. */
+const ensureLoop = async ($: $, agentId: string | undefined, agentType?: string) => {
+  const id = agentId ?? MAIN
+  const now = await $.clock.now()
+  if (id === MAIN) {
+    if (!hasCategory(await read($, board), MAIN)) {
+      await update($, board, b => ensureCategory(b, MAIN, { title: 'Main session', kind: 'session' }, now))
+    }
+
+    return id
+  }
+  if (hasCategory(await read($, board), id) && agentType === undefined) return id
+  const info = (await $.agent.list()).find(a => a.id === id)
+  const type = agentType ?? info?.type
+  const title = info?.description || info?.name || (type ? `${type} agent` : `Agent ${id.slice(0, 6)}`)
+  await update($, board, b =>
+    ensureCategory(b, id, { title, kind: 'agent', agentType: type, parentId: info?.parentId }, now),
+  )
+
+  return id
+}
+
+const taskIdFrom = (text: string | undefined, result: unknown): string | undefined => {
+  const r = result as { task?: { id?: unknown }; id?: unknown } | undefined
+  const fromResult = r?.task?.id ?? r?.id
+  if (typeof fromResult === 'string' || typeof fromResult === 'number') return String(fromResult)
+
+  return text?.match(/#\s?([\w-]+)/)?.[1]
+}
+
+type SessionFile = { sessionId?: string; name?: string; cwd?: string; status?: string; updatedAt?: number }
+
+const readJson = async <T,>($: $, path: string): Promise<T | undefined> => {
+  try {
+    return JSON.parse(await $.fs.read(path)) as T
+  } catch {
+    return undefined
+  }
+}
+
+const listJson = async ($: $, dir: string) => {
+  try {
+    return (await $.fs.list(dir)).filter(f => f.kind === 'file' && f.name.endsWith('.json'))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Cross-session sync: every session running this mod writes its board to
+ * <claude home>/agent-track/<session id>.json, and reads everyone else's next
+ * to the running-session registry (<claude home>/sessions/<pid>.json), which
+ * every Claude Code session keeps, mod or not.
+ */
+const ctx = { home: '', selfId: '', lastWritten: '', lastPeers: '', isSyncing: false }
+
+const syncInit = async ($: $) => {
+  const config = await $.env.get('CLAUDE_CONFIG_DIR')
+  const base = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''
+  ctx.home = (config ?? `${base}/.claude`).replace(/\\/g, '/')
+  ctx.selfId = await $.session.id()
+}
+
+const syncRun = async ($: $) => {
+  const { home, selfId } = ctx
+  if (!home) return
+  const now = await $.clock.now()
+
+  const running = new Map<string, SessionFile>()
+  for (const f of await listJson($, `${home}/sessions`)) {
+    const s = await readJson<SessionFile>($, `${home}/sessions/${f.name}`)
+    if (s?.sessionId) running.set(s.sessionId, s)
+  }
+
+  const me = running.get(selfId)
+  if (me?.name && me.name !== (await read($, selfName))) await update($, selfName, () => me.name ?? '')
+
+  const local = await read($, board)
+  if (local.categories.length > 0) {
+    const body = JSON.stringify(local)
+    if (body !== ctx.lastWritten) {
+      const snap: Snapshot = { sessionId: selfId, name: me?.name ?? 'Session', cwd: me?.cwd ?? '', updatedAt: now, board: local }
+      await $.fs.write(`${home}/agent-track/${selfId}.json`, JSON.stringify(snap))
+      ctx.lastWritten = body
+    }
+  }
+
+  const published = new Map<string, Snapshot>()
+  for (const f of await listJson($, `${home}/agent-track`)) {
+    if (now - f.mtimeMs > KEEP_MS) continue
+    const snap = await readJson<Snapshot>($, `${home}/agent-track/${f.name}`)
+    if (snap?.sessionId && snap.sessionId !== selfId) published.set(snap.sessionId, snap)
+  }
+
+  const ids = new Set([...running.keys(), ...published.keys()])
+  ids.delete(selfId)
+  const list: Peer[] = [...ids].map(id => {
+    const live = running.get(id)
+    const snap = published.get(id)
+
+    return {
+      sessionId: id,
+      name: live?.name || snap?.name || `Session ${id.slice(0, 8)}`,
+      cwd: live?.cwd ?? snap?.cwd ?? '',
+      status: live?.status ?? 'closed',
+      isRunning: live !== undefined,
+      updatedAt: Math.max(live?.updatedAt ?? 0, snap?.updatedAt ?? 0),
+      board: snap?.board,
+    }
+  })
+  list.sort((a, b) => a.sessionId.localeCompare(b.sessionId))
+  const key = JSON.stringify(list)
+  if (key !== ctx.lastPeers) {
+    ctx.lastPeers = key
+    await update($, peers, () => list)
+  }
+}
+
+/** The project's checklist tabs (from CONFIG_FILE) and the last change seen of each file. */
+const docCtx = { tabs: [] as DocTab[], seen: {} as Record<string, number>, project: '' }
+
+const DOC_SPAN = 7 * 24 * 60 * 60 * 1000
+
+const loadDocConfig = async ($: $) => {
+  try {
+    docCtx.tabs = parseConfig(await $.fs.read(CONFIG_FILE)).tabs
+  } catch {
+    docCtx.tabs = []
+  }
+  try {
+    docCtx.project = (await $.fs.stat('.', { resolve: true })).realPath ?? ''
+  } catch {
+    docCtx.project = ''
+  }
+}
+
+/** Re-reads each tab's file when it changed (or always, with `force`), and keeps its done-count history. */
+const refreshDocs = async ($: $, force = false) => {
+  for (const tab of docCtx.tabs) {
+    const id = tabPaneId(tab)
+    let mtime = 0
+    try {
+      mtime = (await $.fs.stat(tab.file)).mtimeMs
+    } catch {
+      if (force || docCtx.seen[id] !== -1) {
+        docCtx.seen[id] = -1
+        await update($, docs, all => ({
+          ...all,
+          [id]: { title: tab.title, file: tab.file, sections: [], updatedAt: 0, error: `Can't read ${tab.file}` },
+        }))
+      }
+      continue
+    }
+    if (!force && docCtx.seen[id] === mtime) continue
+    docCtx.seen[id] = mtime
+    let text = ''
+    try {
+      text = await $.fs.read(tab.file)
+    } catch {
+      continue
+    }
+    const doc = { ...parseDoc(text, tab), updatedAt: mtime }
+    await update($, docs, all => ({ ...all, [id]: doc }))
+    const done = doc.sections.flatMap(itemsOf).filter(i => i.status === 'completed').length
+    const key = `history:${docCtx.project}|${tab.file}`
+    const stored = (await $.store.get(key)) as [number, number][] | undefined
+    const past = Array.isArray(stored) ? stored : []
+    const last = past[past.length - 1]
+    const next = last && last[1] === done ? past : [...past, [mtime, done] as [number, number]].slice(-200)
+    if (next !== past) await $.store.set(key, next)
+    await update($, docHistory, all => ({ ...all, [id]: next }))
+  }
+}
+
+const reread = async ($: $, said: string) => {
+  if (said.includes('agent-track.json')) await loadDocConfig($)
+  if (said.includes('agent-track.json') || docCtx.tabs.some(t => said.includes(t.file.split('/').pop() ?? t.file))) {
+    await refreshDocs($, true)
+  }
+}
+
+/** What runs in this session now: running agents' labels, and the todo items in progress on the board. */
+const refreshLive = async ($: $) => {
+  const agents = (await $.agent.list()).filter(a => a.status === 'running').flatMap(a => [a.description, a.name ?? ''])
+  const b = await read($, board)
+  const todos = b.categories
+    .filter(c => !c.isFinished)
+    .flatMap(c => [
+      ...(c.kind === 'agent' && c.isLive ? [c.title] : []),
+      ...c.tasks.filter(t => t.status === 'in_progress').flatMap(t => [t.title, t.activeForm ?? '']),
+    ])
+  const list = [...new Set([...agents, ...todos].map(t => t.trim()).filter(t => t.length > 0))].sort()
+  const was = await read($, liveWork)
+  if (list.join('|') !== was.join('|')) await update($, liveWork, () => list)
+}
+
+/** Opens every tab of the board (Agents and the project's), or closes them when any is open. */
+const toggleBoard = async ($: $, reload: boolean) => {
+  await loadDocConfig($)
+  await refreshDocs($, true)
+  const ours = [{ id: PANE, title: TITLE }, ...docPanes()]
+  const open = new Set((await $.ui.panes()).map(p => p.id))
+  if (!reload && ours.some(p => open.has(p.id))) {
+    for (const p of ours) if (open.has(p.id)) await $.ui.close({ id: p.id })
+
+    return 'Progress board hidden.'
+  }
+  await update($, dismissed, () => false)
+  for (const p of ours) await $.ui.open(p)
+
+  return `Progress board shown: ${ours.map(p => p.title).join(', ')}.`
+}
+
+const docPanes = () => docCtx.tabs.map(tab => ({ id: tabPaneId(tab), title: tab.title }))
+
+export const register: Register = (on, options) => {
+  const name = typeof options.name === 'string' ? options.name.trim() : ''
+
+  on('session.start', async ($, e, next) => {
+    await $.command.register({
+      name: 'agent-track',
+      description: 'Show or hide the live agent progress board',
+    })
+    await $.tool.register({
+      name: 'todo',
+      description:
+        'Publish your current todo list to the live progress board the person is watching. ' +
+        'Send the whole list every time: mark one item in_progress while you work on it and completed when done. ' +
+        'Use it when you have no TodoWrite tool, for any multi-step task.',
+      inputSchema: {
+        type: 'object',
+        required: ['todos'],
+        properties: {
+          todos: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['content', 'status'],
+              properties: {
+                content: { type: 'string', description: 'The task, imperative: "Run the tests"' },
+                status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+                activeForm: { type: 'string', description: 'Present tense: "Running the tests"' },
+              },
+            },
+          },
+        },
+      },
+    })
+    $.clock.every(30_000, () => void update($, tick, n => n + 1))
+    await syncInit($)
+    await loadDocConfig($)
+    await refreshDocs($, true)
+    for (const pane of docPanes()) void $.ui.open(pane)
+    $.clock.every(3_000, () => {
+      void refreshDocs($)
+      void refreshLive($)
+    })
+    $.clock.every(2_000, () => {
+      if (ctx.isSyncing) return
+      ctx.isSyncing = true
+      void syncRun($).finally(() => {
+        ctx.isSyncing = false
+      })
+    })
+
+    return next(e)
+  })
+
+  on('command.run', { command: 'agent-track' }, async ($, e) => ({ text: await toggleBoard($, e.args.trim() === 'reload') }))
+
+  /** The button above the message box: the board's live percents, and a press opens or closes it. */
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const sum = summarize(mergePeers(await read($, board), await read($, selfName), await read($, peers)))
+    const live = await read($, liveWork)
+    const tabs = Object.entries(await read($, docs)).flatMap(([id, raw]) => {
+      const tab = docCtx.tabs.find(t => tabPaneId(t) === id)
+      if (!tab || raw.error) return []
+      const c = countTasks(applyLive(raw, live).sections.flatMap(itemsOf).map(itemAsTask(raw.updatedAt)))
+
+      return [`${tab.title} ${c.percent}%`]
+    })
+    const parts = [...(sum.total > 0 ? [`${TITLE} ${sum.percent}%`] : []), ...tabs]
+
+    return (
+      <Box flexDirection="row" gap={1} alignItems="center">
+        <Button key="board-toggle" plain label="▦ Progress" onPress={() => void toggleBoard($, false)} />
+        <Text color={INK.sub} wrap="truncate-end">
+          {parts.length > 0 ? parts.join(' · ') : 'No tasks yet'}
+        </Text>
+      </Box>
+    )
+  })
+
+
+  on('ui.close', async ($, e, next) => {
+    if (e.id === PANE && e.origin.kind === 'person') await update($, dismissed, () => true)
+
+    return next(e)
+  })
+
+  on('classic.SubagentStart', async ($, e, next) => {
+    await ensureLoop($, e.agent_id, e.agent_type)
+    await autoOpen($)
+
+    return next(e)
+  })
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    const id = await ensureLoop($, e.agent_id)
+    const now = await $.clock.now()
+    await update($, board, b => setLive(b, id, false, now))
+
+    return next(e)
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    const now = await $.clock.now()
+    await ensureLoop($, undefined)
+    await update($, board, b => setLive(b, MAIN, true, now))
+
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const id = e.agentId ?? MAIN
+    if (hasCategory(await read($, board), id)) {
+      const now = await $.clock.now()
+      await update($, board, b => setLive(b, id, false, now))
+    }
+
+    return next(e)
+  })
+
+  /** A tool that writes files and names a tab's file (or the tab list) re-reads it right after it ran. */
+  on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
+    const ran = await next(e)
+    await reread($, JSON.stringify(e))
+
+    return ran
+  })
+  on('tool.call', { tool: 'Write' }, async ($, e, next) => {
+    const ran = await next(e)
+    await reread($, JSON.stringify(e))
+
+    return ran
+  })
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const ran = await next(e)
+    await reread($, JSON.stringify(e))
+
+    return ran
+  })
+  on('tool.call', { tool: 'PowerShell' }, async ($, e, next) => {
+    const ran = await next(e)
+    await reread($, JSON.stringify(e))
+
+    return ran
+  })
+
+  on('tool.call', async ($, e, next) => {
+    const call = e as unknown as Loose
+    const tool = call.tool
+
+    if ((tool === 'TodoWrite' || tool === TODO_TOOL) && Array.isArray(call.todos)) {
+      const id = await ensureLoop($, call.agentId)
+      const now = await $.clock.now()
+      const todos = call.todos as TodoItem[]
+      await update($, board, b => applyTodoWrite(b, id, todos, now))
+      await autoOpen($)
+      if (tool === TODO_TOOL) {
+        const text = `Board updated: ${todos.length} items.`
+
+        return { result: text, text }
+      }
+
+      return next(e)
+    }
+
+    if (tool === 'TaskCreate' && typeof call.subject === 'string') {
+      const ran = await next(e)
+      if (ran.isError) return ran
+      const id = await ensureLoop($, call.agentId)
+      const now = await $.clock.now()
+      const taskId = taskIdFrom(ran.text, ran.result)
+      await update($, board, b =>
+        applyTaskCreate(
+          b,
+          id,
+          {
+            id: taskId,
+            subject: call.subject as string,
+            description: call.description as string | undefined,
+            activeForm: call.activeForm as string | undefined,
+          },
+          now,
+        ),
+      )
+      await autoOpen($)
+
+      return ran
+    }
+
+    if (tool === 'TaskUpdate' && call.taskId !== undefined) {
+      const ran = await next(e)
+      if (ran.isError) return ran
+      const id = await ensureLoop($, call.agentId)
+      const now = await $.clock.now()
+      await update($, board, b =>
+        applyTaskUpdate(
+          b,
+          id,
+          String(call.taskId),
+          {
+            status: call.status as string | undefined,
+            subject: call.subject as string | undefined,
+            description: call.description as string | undefined,
+            activeForm: call.activeForm as string | undefined,
+          },
+          now,
+        ),
+      )
+
+      return ran
+    }
+
+    if (call.agentId !== undefined && !hasCategory(await read($, board), call.agentId)) {
+      await ensureLoop($, call.agentId)
+    }
+
+    return next(e)
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const els = $.ui.resolve(e)
+    const { Box, Text, Button } = els
+    const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
+
+    await read($, tick)
+    const now = await $.clock.now()
+    const b = mergePeers(await read($, board), await read($, selfName), await read($, peers))
+    const shut = new Set(await read($, collapsed))
+    const pick = await read($, selected)
+    const sum = summarize(b)
+
+    const flips = await read($, toggled)
+    /** Flips one section or agent; `open` is the state it lands in, so the turn plays only once the flip is drawn. */
+    const toggle = async (key: string, open: boolean) => {
+      const at = await $.clock.now()
+      await update($, toggled, all => ({
+        ...Object.fromEntries(Object.entries(all).filter(([, t]) => at - t.at < MOTION_MS)),
+        [key]: { at, open },
+      }))
+      await update($, collapsed, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
+    }
+    /** Which way a chevron turns if it was toggled a moment ago; nothing once it has settled. */
+    const motionOf = (key: string, isOpen: boolean): Motion => {
+      const flip = flips[key]
+
+      return flip && flip.open === isOpen && now - flip.at < MOTION_MS ? (isOpen ? 'open' : 'close') : undefined
+    }
+
+    if (Svg) {
+      const Art = Svg
+      const pickBy = (key: string) => update($, selected, cur => (cur === key ? null : key))
+      const sections = grouped(b)
+      const working = sections.find(s => s.id === 'working')?.categories.length ?? 0
+      const subtitle =
+        working > 0
+          ? 'Working on things! I’ll ping you.'
+          : sum.total > 0 && sum.done === sum.total
+            ? 'All caught up.'
+            : 'Nothing running right now.'
+      const completions = b.categories.flatMap(c => c.tasks.flatMap(t => (t.completedAt ? [t.completedAt] : [])))
+
+      /** One drawn strip with native controls laid over the slots it leaves blank; unkeyed, so it is no hover scope. */
+      const strip = (key: string, source: string, alt: string, left?: JSX.Element, right?: JSX.Element, cx = 37) => (
+        <Box flexDirection="column">
+          <Art source={source} alt={alt} />
+          {left && (
+            <Box
+              position="absolute"
+              left={0}
+              top={0}
+              bottom={0}
+              width={hitWidth(cx)}
+              alignItems="center"
+              justifyContent="center"
+            >
+              {left}
+            </Box>
+          )}
+          {right && (
+            <Box position="absolute" right={1} top={0} bottom={0} justifyContent="center">
+              {right}
+            </Box>
+          )}
+        </Box>
+      )
+
+      const detail = (() => {
+        if (!pick) return null
+        const [catId, taskId] = pick.split('::')
+        const cat = b.categories.find(c => c.id === catId)
+        if (!cat) return null
+        const task = cat.tasks.find(t => t.id === taskId)
+        const c = countTasks(cat.tasks)
+        const end = task?.completedAt ?? (task?.status === 'in_progress' ? now : undefined)
+
+        return (
+          <Box key="detail" flexDirection="column" borderStyle="round" borderColor={INK.border} paddingX={1} marginTop={1}>
+            <Box flexDirection="row" gap={1}>
+              <Box flexGrow={1}>
+                <Text bold color={INK.text} wrap="truncate-end">
+                  {task ? task.title : cat.title}
+                </Text>
+              </Box>
+              <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
+            </Box>
+            {task ? (
+              <Box flexDirection="column">
+                <Text color={INK.sub}>
+                  {task.status === 'completed' ? 'Done' : task.status === 'in_progress' ? 'In progress' : 'Not started'} · in{' '}
+                  {cat.title}
+                </Text>
+                {task.activeForm && task.activeForm !== task.title && <Text color={INK.sub}>Step: {task.activeForm}</Text>}
+                {task.description && <Text wrap="wrap">{task.description}</Text>}
+                <Text color={INK.sub}>
+                  Created {clock(task.createdAt)} · Started {clock(task.startedAt)} · Finished {clock(task.completedAt)}
+                </Text>
+                <Text color={INK.sub}>Time spent {duration(task.startedAt, end)}</Text>
+              </Box>
+            ) : (
+              <Box flexDirection="column">
+                <Text color={INK.sub}>{[cat.agentType, cat.note].filter(Boolean).join(' · ') || cat.kind}</Text>
+                <Text color={INK.sub}>
+                  {c.done}/{c.total} tasks · started {clock(cat.startedAt)} · last change {clock(cat.updatedAt)}
+                </Text>
+                <Text color={INK.sub}>{currentStep(cat)}</Text>
+              </Box>
+            )}
+          </Box>
+        )
+      })()
+
+      return (
+        <Box flexDirection="column">
+          <Art source={headerSvg(name, subtitle, completions, now)} alt={`Welcome back${name ? `, ${name}` : ''}. ${subtitle}`} />
+          <Box marginY={1}>
+            <Svg
+              source={summarySvg(sum)}
+              alt={`${sum.percent}%: ${sum.done} completed, ${sum.inProgress} in progress, ${sum.notStarted} not started`}
+            />
+          </Box>
+          {detail}
+          {sections.map(section => {
+            const key = `s:${section.id}`
+            const isOpen = !shut.has(key)
+            const count = section.categories.length
+            const sectionMotion = motionOf(key, isOpen)
+
+            return (
+              <Box key={`sec-${section.id}`} flexDirection="column" marginBottom={1}>
+                {strip(
+                  `head-row-${section.id}`,
+                  sectionHeadSvg(section.id, section.title, count, isOpen, sectionMotion, sectionProgress(section.categories)),
+                  `${section.title}, ${count}, ${isOpen ? 'expanded' : 'collapsed'}`,
+                  <Button key={`head-${section.id}`} plain label={HIT} onPress={() => toggle(key, !isOpen)} />,
+                  undefined,
+                  24,
+                )}
+                {isOpen && count === 0 && (
+                  <Art source={emptyRowSvg(section.empty, { order: sectionMotion ? 0 : undefined })} alt={section.empty} />
+                )}
+                {isOpen &&
+                  section.categories.flatMap((cat, i) => {
+                    const fold = `o:${cat.id}`
+                    const isExpanded = shut.has(fold)
+                    const isLast = i === count - 1
+                    const foldMotion = motionOf(fold, isExpanded)
+                    const row = strip(
+                      `agent-${cat.id}`,
+                      agentRowSvg(cat, now, {
+                        isLast,
+                        isOpen: isExpanded,
+                        motion: foldMotion,
+                        order: sectionMotion === 'open' ? i : undefined,
+                      }),
+                      `${cat.title}: ${currentStep(cat)}, ${isExpanded ? 'expanded' : 'collapsed'}`,
+                      <Button key={`fold-${cat.id}`} plain label={HIT} onPress={() => toggle(fold, !isExpanded)} />,
+                      <Button key={`more-${cat.id}`} plain label="⋯" onPress={() => pickBy(`${cat.id}::`)} />,
+                    )
+                    if (!isExpanded) return [row]
+                    const reveal = foldMotion === 'open'
+                    if (cat.tasks.length === 0) {
+                      return [
+                        row,
+                        <Art
+                          key={`none-${cat.id}`}
+                          source={emptyRowSvg('No tasks yet.', { isLast, indent: 121, order: reveal ? 0 : undefined })}
+                          alt="No tasks yet."
+                        />,
+                      ]
+                    }
+                    const tasks = cat.tasks.map((task, j) =>
+                      strip(
+                        `row-${cat.id}::${task.id}`,
+                        taskRowSvg(task, now, {
+                          isLast: isLast && j === cat.tasks.length - 1,
+                          isPicked: pick === `${cat.id}::${task.id}`,
+                          order: reveal ? j : undefined,
+                        }),
+                        `${task.title}: ${task.status}`,
+                        undefined,
+                        <Button key={`task-${cat.id}::${task.id}`} plain label="⋯" onPress={() => pickBy(`${cat.id}::${task.id}`)} />,
+                      ),
+                    )
+
+                    return [row, ...tasks]
+                  })}
+              </Box>
+            )
+          })}
+        </Box>
+      )
+    }
+
+    const ring = (fraction: number, color: string) => <Text color={color}>{ringGlyph(fraction)}</Text>
+
+    const chip = (task: Task) => {
+      const [label, color] =
+        task.status === 'completed'
+          ? ['Done', C.green]
+          : task.status === 'in_progress'
+            ? ['In progress', C.blue]
+            : ['Not started', C.gray]
+
+      return <Text color={color}>{label}</Text>
+    }
+
+    const glyph = (task: Task) =>
+      task.status === 'completed' ? (
+        <Text color={C.green}>✓</Text>
+      ) : task.status === 'in_progress' ? (
+        <Text color={C.blue}>◐</Text>
+      ) : (
+        <Text color={C.gray}>○</Text>
+      )
+
+    const summary = (
+      <Box flexDirection="column" marginBottom={1}>
+        <Box flexDirection="row" gap={1}>
+          <Text bold>{sum.percent}%</Text>
+          <Text color={C.green}>{bar(sum.percent / 100, 16)}</Text>
+          <Text dimColor>
+            {sum.done}/{sum.total} {sum.unit}
+          </Text>
+        </Box>
+        <Box flexDirection="row" gap={2}>
+          <Text color={C.green}>● {sum.done} completed</Text>
+          <Text color={C.blue}>● {sum.inProgress} in progress</Text>
+          <Text color={C.gray}>● {sum.notStarted} not started</Text>
+        </Box>
+      </Box>
+    )
+
+    const taskRow = (cat: Category, task: Task) => {
+      const key = `${cat.id}::${task.id}`
+      const isPicked = pick === key
+      const when = task.status === 'completed' ? task.completedAt : (task.startedAt ?? task.createdAt)
+
+      return (
+        <Box key={`row-${key}`} flexDirection="row" gap={1} paddingLeft={4}>
+          {glyph(task)}
+          <Box flexGrow={1}>
+            <Button
+              key={`task-${key}`}
+              plain
+              label={task.title}
+              dimColor={task.status === 'completed' && !isPicked}
+              onPress={() => update($, selected, cur => (cur === key ? null : key))}
+            />
+          </Box>
+          {chip(task)}
+          <Text dimColor>{relTime(when, now)}</Text>
+        </Box>
+      )
+    }
+
+    const agentRow = (cat: Category) => {
+      const c = countTasks(cat.tasks)
+      const key = `o:${cat.id}`
+      const isOpen = shut.has(key)
+      const live = cat.isLive && !cat.isFinished
+      const color = c.total > 0 && c.done === c.total ? C.green : C.blue
+
+      return (
+        <Box key={`agent-${cat.id}`} flexDirection="column">
+          <Box flexDirection="row" gap={1}>
+            <Button key={`fold-${cat.id}`} plain label={isOpen ? '▾' : '▸'} onPress={() => toggle(key, !isOpen)} />
+            <Text color={rowCheck(cat) === 'empty' ? INK.box : INK.check}>
+              {rowCheck(cat) === 'done' ? '☑' : rowCheck(cat) === 'mixed' ? '⊟' : '☐'}
+            </Text>
+            <Box flexGrow={1}>
+              <Text wrap="truncate-end">
+                {cat.title}
+                {live ? <Text color={C.green}> ●</Text> : ''}
+              </Text>
+            </Box>
+            <Box flexDirection="row" gap={1}>
+              {ring(c.total === 0 ? 0 : c.done / c.total, color)}
+              <Text>
+                {c.done}/{c.total}
+              </Text>
+              <Text dimColor>{relTime(cat.updatedAt, now) || '—'}</Text>
+              <Button key={`more-${cat.id}`} plain label="⋯" onPress={() => update($, selected, cur => (cur === `${cat.id}::` ? null : `${cat.id}::`))} />
+            </Box>
+          </Box>
+          <Box paddingLeft={6}>
+            <Text dimColor wrap="truncate-end">
+              {cat.agentType && cat.kind === 'agent' ? `${cat.agentType} · ` : ''}
+              {currentStep(cat)}
+            </Text>
+          </Box>
+          {isOpen && cat.tasks.map(task => taskRow(cat, task))}
+        </Box>
+      )
+    }
+
+    const sections = grouped(b).map(section => {
+      const key = `s:${section.id}`
+      const isOpen = !shut.has(key)
+
+      return (
+        <Box key={`sec-${section.id}`} flexDirection="column" marginBottom={1}>
+          <Box flexDirection="row" gap={1}>
+            <Button key={`head-${section.id}`} plain label={isOpen ? '▾' : '▸'} onPress={() => toggle(key, !isOpen)} />
+            <Text color={SECTION_DOT[section.id]}>●</Text>
+            <Text bold>{section.title}</Text>
+            <Text dimColor>{section.categories.length}</Text>
+          </Box>
+          {isOpen && section.categories.length === 0 && (
+            <Box paddingLeft={2}>
+              <Text dimColor>{section.empty}</Text>
+            </Box>
+          )}
+          {isOpen && section.categories.map(agentRow)}
+        </Box>
+      )
+    })
+
+    const detail = (() => {
+      if (!pick) return null
+      const [catId, taskId] = pick.split('::')
+      const cat = b.categories.find(c => c.id === catId)
+      const task = cat?.tasks.find(t => t.id === taskId)
+      if (!cat) return null
+      if (!task) {
+        const c = countTasks(cat.tasks)
+
+        return (
+          <Box key="detail" flexDirection="column" borderStyle="round" borderColor={C.gray} paddingX={1}>
+            <Box flexDirection="row" gap={1}>
+              <Box flexGrow={1}>
+                <Text bold wrap="truncate-end">
+                  {cat.title}
+                </Text>
+              </Box>
+              <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
+            </Box>
+            <Text dimColor>{[cat.agentType, cat.note].filter(Boolean).join(' · ') || cat.kind}</Text>
+            <Text dimColor>
+              {c.done}/{c.total} tasks · started {clock(cat.startedAt)} · last change {clock(cat.updatedAt)}
+            </Text>
+          </Box>
+        )
+      }
+      const end = task.completedAt ?? (task.status === 'in_progress' ? now : undefined)
+
+      return (
+        <Box
+          key="detail"
+          flexDirection="column"
+          borderStyle="round"
+          borderColor={C.gray}
+          paddingX={1}
+        >
+          <Box flexDirection="row" gap={1}>
+            <Box flexGrow={1}>
+              <Text bold wrap="truncate-end">
+                {task.title}
+              </Text>
+            </Box>
+            <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
+          </Box>
+          <Box flexDirection="row" gap={1}>
+            {chip(task)}
+            <Text dimColor>in {cat.title}</Text>
+          </Box>
+          {task.activeForm && task.activeForm !== task.title && <Text dimColor>Step: {task.activeForm}</Text>}
+          {task.description && <Text wrap="wrap">{task.description}</Text>}
+          <Text dimColor>
+            Created {clock(task.createdAt)} · Started {clock(task.startedAt)} · Finished {clock(task.completedAt)}
+          </Text>
+          <Text dimColor>Time spent {duration(task.startedAt, end)}</Text>
+        </Box>
+      )
+    })()
+
+    return (
+      <Box flexDirection="column">
+        {summary}
+        {b.categories.length === 0 ? (
+          <Text dimColor>No agents have a todo list yet. They show up here as soon as one does.</Text>
+        ) : (
+          sections
+        )}
+        {detail}
+      </Box>
+    )
+  })
+
+  /** A project tab: one checklist file in the board's design. */
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    const raw = (await read($, docs))[e.requestId]
+    if (!raw) return next(e)
+    const doc = applyLive(raw, await read($, liveWork))
+    const pane = e.requestId
+    const els = $.ui.resolve(e)
+    const { Box, Text, Button } = els
+    const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
+
+    await read($, tick)
+    const now = await $.clock.now()
+    const shut = new Set(await read($, collapsed))
+    const flips = await read($, toggled)
+    const pick = await read($, selected)
+    const history = (await read($, docHistory))[pane] ?? []
+
+    const all = doc.sections.flatMap(itemsOf)
+    const asTask = itemAsTask(doc.updatedAt)
+    const sum = { ...countTasks(all.map(asTask)), unit: 'tasks' as const }
+    const stateOf = (items: readonly DocItem[], isLive = false): SectionId => {
+      const c = countTasks(items.map(asTask))
+      if (c.total > 0 && c.done === c.total) return 'done'
+
+      return isLive || c.done + c.inProgress > 0 ? 'working' : 'waiting'
+    }
+    /** Sections start open unless finished; groups start closed. A key in `collapsed` flips the default. */
+    const sectionOpen = (sid: string, state: SectionId) => (state !== 'done') !== shut.has(`d:${pane}:${sid}`)
+    const groupOpen = (gid: string) => shut.has(`g:${pane}:${gid}`)
+    const toggle = async (key: string, open: boolean) => {
+      const at = await $.clock.now()
+      await update($, toggled, list => ({
+        ...Object.fromEntries(Object.entries(list).filter(([, t]) => at - t.at < MOTION_MS)),
+        [key]: { at, open },
+      }))
+      await update($, collapsed, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
+    }
+    const motionOf = (key: string, isOpen: boolean): Motion => {
+      const flip = flips[key]
+
+      return flip && flip.open === isOpen && now - flip.at < MOTION_MS ? (isOpen ? 'open' : 'close') : undefined
+    }
+    const pickBy = (key: string) => update($, selected, cur => (cur === key ? null : key))
+    const picked = pick?.startsWith(`${pane}::`) ? all.find(i => `${pane}::${i.id}` === pick) : undefined
+    const subtitle = doc.error ?? `${doc.file} · updated ${relTime(doc.updatedAt, now) || 'just now'}`
+    const steps = history.flatMap(([t, d], i) => {
+      const prev = history[i - 1]?.[1] ?? d
+
+      return d > prev ? Array.from({ length: Math.min(d - prev, 20) }, () => t) : []
+    })
+
+    const detail = picked && (
+      <Box key="detail" flexDirection="column" borderStyle="round" borderColor={INK.border} paddingX={1} marginBottom={1}>
+        <Box flexDirection="row" gap={1}>
+          <Box flexGrow={1}>
+            <Text bold wrap="truncate-end">
+              {picked.title}
+            </Text>
+          </Box>
+          <Button key="detail-close" role="dismiss" label="Close" onPress={() => update($, selected, () => null)} />
+        </Box>
+        <Text color={INK.sub}>
+          {picked.status === 'completed' ? 'Done' : picked.status === 'in_progress' ? 'In progress' : 'Not started'}
+        </Text>
+        {picked.detail !== picked.title && <Text wrap="wrap">{picked.detail}</Text>}
+      </Box>
+    )
+
+    if (Svg) {
+      const Art = Svg
+      const strip = (source: string, alt: string, left?: JSX.Element, right?: JSX.Element, cx = 37) => (
+        <Box flexDirection="column">
+          <Art source={source} alt={alt} />
+          {left && (
+            <Box
+              position="absolute"
+              left={0}
+              top={0}
+              bottom={0}
+              width={hitWidth(cx)}
+              alignItems="center"
+              justifyContent="center"
+            >
+              {left}
+            </Box>
+          )}
+          {right && (
+            <Box position="absolute" right={1} top={0} bottom={0} justifyContent="center">
+              {right}
+            </Box>
+          )}
+        </Box>
+      )
+      const more = (id: string) => (
+        <Button key={`item-${pane}::${id}`} plain label="⋯" onPress={() => pickBy(`${pane}::${id}`)} />
+      )
+
+      return (
+        <Box flexDirection="column">
+          <Art source={headerSvg('', subtitle, steps, now, doc.title, DOC_SPAN)} alt={`${doc.title}. ${subtitle}`} />
+          <Box marginY={1}>
+            <Art
+              source={summarySvg(sum)}
+              alt={`${sum.percent}%: ${sum.done} completed, ${sum.inProgress} in progress, ${sum.notStarted} not started`}
+            />
+          </Box>
+          {detail}
+          {doc.sections.map(section => {
+            const items = itemsOf(section)
+            const state = stateOf(items, section.isLive)
+            const key = `d:${pane}:${section.id}`
+            const isOpen = sectionOpen(section.id, state)
+            const sectionMotion = motionOf(key, isOpen)
+            const c = countTasks(items.map(asTask))
+            const rows: JSX.Element[] = []
+            if (isOpen) {
+              section.items.forEach((item, j) =>
+                rows.push(
+                  strip(
+                    taskRowSvg(asTask(item), now, {
+                      isLast: section.groups.length === 0 && j === section.items.length - 1,
+                      isPicked: pick === `${pane}::${item.id}`,
+                      order: sectionMotion === 'open' ? j : undefined,
+                      when: '',
+                      flat: true,
+                    }),
+                    `${item.title}: ${item.status}`,
+                    undefined,
+                    more(item.id),
+                  ),
+                ),
+              )
+              section.groups.forEach((group, j) => {
+                const gkey = `g:${pane}:${group.id}`
+                const gOpen = groupOpen(group.id)
+                const gMotion = motionOf(gkey, gOpen)
+                const isLast = j === section.groups.length - 1
+                const cat = groupAsCategory(group.id, group.title, group.items, doc.updatedAt, group.isLive)
+                const gc = countTasks(cat.tasks)
+                rows.push(
+                  strip(
+                    agentRowSvg(cat, now, {
+                      isLast,
+                      isOpen: gOpen,
+                      motion: gMotion,
+                      order: sectionMotion === 'open' ? section.items.length + j : undefined,
+                      when: `${gc.percent}%`,
+                    }),
+                    `${group.title}: ${gc.done}/${gc.total}, ${gOpen ? 'expanded' : 'collapsed'}`,
+                    <Button key={`group-${pane}:${group.id}`} plain label={HIT} onPress={() => toggle(gkey, !gOpen)} />,
+                  ),
+                )
+                if (gOpen) {
+                  group.items.forEach((item, k) =>
+                    rows.push(
+                      strip(
+                        taskRowSvg(asTask(item), now, {
+                          isLast: isLast && k === group.items.length - 1,
+                          isPicked: pick === `${pane}::${item.id}`,
+                          order: gMotion === 'open' ? k : undefined,
+                          when: '',
+                        }),
+                        `${item.title}: ${item.status}`,
+                        undefined,
+                        more(item.id),
+                      ),
+                    ),
+                  )
+                }
+              })
+              if (items.length === 0) rows.push(<Art source={emptyRowSvg('No checklist items.')} alt="No checklist items." />)
+            }
+
+            return (
+              <Box key={`doc-${pane}-${section.id}`} flexDirection="column" marginBottom={1}>
+                {strip(
+                  sectionHeadSvg(state, section.title, `${c.done}/${c.total}`, isOpen, sectionMotion, c),
+                  `${section.title}, ${c.done} of ${c.total} done, ${isOpen ? 'expanded' : 'collapsed'}`,
+                  <Button key={`head-${pane}:${section.id}`} plain label={HIT} onPress={() => toggle(key, !isOpen)} />,
+                  undefined,
+                  24,
+                )}
+                {rows}
+              </Box>
+            )
+          })}
+        </Box>
+      )
+    }
+
+    const glyph = (status: string) =>
+      status === 'completed' ? (
+        <Text color={C.green}>☑</Text>
+      ) : status === 'in_progress' ? (
+        <Text color={C.blue}>◐</Text>
+      ) : (
+        <Text color={C.gray}>☐</Text>
+      )
+    const itemRow = (item: DocItem, indent: number) => (
+      <Box key={`row-${pane}-${item.id}`} flexDirection="row" gap={1} paddingLeft={indent}>
+        {glyph(item.status)}
+        <Box flexGrow={1}>
+          <Button
+            key={`item-${pane}::${item.id}`}
+            plain
+            label={item.title}
+            dimColor={item.status === 'completed'}
+            onPress={() => pickBy(`${pane}::${item.id}`)}
+          />
+        </Box>
+      </Box>
+    )
+
+    return (
+      <Box flexDirection="column">
+        <Text bold>{doc.title}</Text>
+        <Text dimColor>{subtitle}</Text>
+        <Box flexDirection="row" gap={1} marginTop={1}>
+          <Text bold>{sum.percent}%</Text>
+          <Text color={C.green}>{bar(sum.percent / 100, 16)}</Text>
+          <Text dimColor>
+            {sum.done}/{sum.total} tasks
+          </Text>
+        </Box>
+        <Box flexDirection="row" gap={2} marginBottom={1}>
+          <Text color={C.green}>● {sum.done} completed</Text>
+          <Text color={C.blue}>● {sum.inProgress} in progress</Text>
+          <Text color={C.gray}>● {sum.notStarted} not started</Text>
+        </Box>
+        {doc.sections.map(section => {
+          const items = itemsOf(section)
+          const state = stateOf(items, section.isLive)
+          const key = `d:${pane}:${section.id}`
+          const isOpen = sectionOpen(section.id, state)
+          const c = countTasks(items.map(asTask))
+
+          return (
+            <Box key={`doc-${pane}-${section.id}`} flexDirection="column">
+              <Box flexDirection="row" gap={1}>
+                <Button
+                  key={`head-${pane}:${section.id}`}
+                  plain
+                  label={isOpen ? '▾' : '▸'}
+                  onPress={() => toggle(key, !isOpen)}
+                />
+                <Text color={SECTION_DOT[state]}>●</Text>
+                <Box flexGrow={1}>
+                  <Text bold wrap="truncate-end">
+                    {section.title}
+                  </Text>
+                </Box>
+                <Text dimColor>
+                  {c.done}/{c.total}
+                </Text>
+              </Box>
+              {isOpen && section.items.map(item => itemRow(item, 4))}
+              {isOpen &&
+                section.groups.map(group => {
+                  const gkey = `g:${pane}:${group.id}`
+                  const gOpen = groupOpen(group.id)
+                  const gc = countTasks(group.items.map(asTask))
+
+                  return (
+                    <Box key={`grp-${pane}-${group.id}`} flexDirection="column" paddingLeft={2}>
+                      <Box flexDirection="row" gap={1}>
+                        <Button
+                          key={`group-${pane}:${group.id}`}
+                          plain
+                          label={gOpen ? '▾' : '▸'}
+                          onPress={() => toggle(gkey, !gOpen)}
+                        />
+                        <Box flexGrow={1}>
+                          <Text wrap="truncate-end">{group.title}</Text>
+                        </Box>
+                        <Text color={gc.done === gc.total ? C.green : C.blue}>
+                          {ringGlyph(gc.total ? gc.done / gc.total : 0)}
+                        </Text>
+                        <Text>
+                          {gc.done}/{gc.total}
+                        </Text>
+                      </Box>
+                      {gOpen && group.items.map(item => itemRow(item, 4))}
+                    </Box>
+                  )
+                })}
+            </Box>
+          )
+        })}
+        {detail}
+      </Box>
+    )
+  })
+}

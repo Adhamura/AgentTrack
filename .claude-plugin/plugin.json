@@ -1,0 +1,27 @@
+{
+  "name": "agent-track",
+  "version": "1.0.0",
+  "description": "Live progress board for Claude Code: every session, subagent and todo list on one board, in the terminal and the desktop app.",
+  "author": {
+    "name": "Kazuki"
+  },
+  "license": "MIT",
+  "keywords": [
+    "progress",
+    "todo",
+    "subagents",
+    "dashboard",
+    "sessions",
+    "pane",
+    "mod"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "name": {
+      "type": "string",
+      "title": "Your name",
+      "description": "Shown in the board's greeting: Welcome back, <name>.",
+      "default": ""
+    }
+  }
+}
