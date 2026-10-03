@@ -298,7 +298,7 @@ export const mergePeers = (local: Board, selfName: string, peers: readonly Peer[
         startedAt: peer.updatedAt,
         updatedAt: peer.updatedAt,
         tasks: [],
-        note: `${where} · ${peer.isRunning ? peer.status : 'closed'} · no board (mod not loaded there)`,
+        note: `${where} · ${peer.isRunning ? peer.status : 'closed'} · no board (Agent Track not loaded there)`,
       },
     ]
   })
