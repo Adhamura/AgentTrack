@@ -4,7 +4,7 @@
  * scales together and lines up. Controls (chevrons, ⋯) are native Buttons laid
  * over the blank slots these leave for them.
  */
-import type { Category, Task } from '../types'
+import type { Category, Facet, Task } from '../types'
 import type { Counts, Filter, Scope, SectionId, Summary } from './board'
 import { countTasks, currentStep, relTime, rowCheck, sectionOf } from './board'
 import { runs } from './search'
@@ -411,10 +411,59 @@ export const agentRowSvg = (
 }
 
 /** One todo item under an open agent, with the guide line on its left. */
+/** Where a row's part columns end: left of the widest status chip. */
+const FACETS_END = 651
+/** A part column's width: its icon and its word. */
+const facetW = (key: string) => Math.max(64, 34 + key.length * 8.2)
+
+/**
+ * Where each part column sits, right-aligned before the status chip; with no
+ * room for words (`textX` + 140 px left for the name), each is its icon alone.
+ */
+export const facetLayout = (columns: readonly string[], textX: number) => {
+  const full = columns.map(facetW)
+  const total = full.reduce((a, b) => a + b, 0)
+  const ws = FACETS_END - total < textX + 140 ? columns.map(() => 30) : full
+  let x = FACETS_END - ws.reduce((a, b) => a + b, 0)
+
+  return columns.map((key, i) => {
+    const at = { key, x, w: ws[i]!, hasWord: ws[i] !== 30 }
+    x += ws[i]!
+
+    return at
+  })
+}
+
+/** One part's cell: a green check when done, an empty ring when not, and its column's word; a dash when the line has no such part. */
+const facetCell = (at: { key: string; x: number; hasWord: boolean }, facet: Facet | undefined) => {
+  const cx = at.x + 11
+  const icon = !facet
+    ? `<path d="M${cx - 4},18 L${cx + 4},18" stroke="${INK.box}" stroke-width="2" stroke-linecap="round"/>`
+    : facet.isDone
+      ? `<circle cx="${cx}" cy="18" r="9" fill="${INK.green}"/>` +
+        `<path d="M${cx - 4},18.5 L${cx - 1},21.5 L${cx + 4.5},14.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`
+      : `<circle cx="${cx}" cy="18" r="8.25" fill="#fff" stroke="${INK.box}" stroke-width="1.5"/>`
+  const word = at.hasWord
+    ? `<text x="${at.x + 26}" y="23.5" font-size="15" fill="${facet?.isDone ? INK.greenText : INK.grayText}">${esc(at.key)}</text>`
+    : ''
+
+  return icon + word
+}
+
 export const taskRowSvg = (
   task: Task,
   now: number,
-  opts: { isLast: boolean; isPicked: boolean; order?: number; when?: string; flat?: boolean; mark?: readonly string[] },
+  opts: {
+    isLast: boolean
+    isPicked: boolean
+    order?: number
+    when?: string
+    flat?: boolean
+    mark?: readonly string[]
+    /** The list's part columns, and this line's parts, drawn one per column. */
+    columns?: readonly string[]
+    facets?: readonly Facet[]
+  },
 ) => {
   const h = 36
   const [chip, chipBg, chipText] =
@@ -430,6 +479,8 @@ export const taskRowSvg = (
   /** A flat row sits right under a section header: no guide line, aligned with the rows' checkboxes. */
   const [boxX, textX] = opts.flat ? [71, 120] : [121, 166]
   const time = opts.when ?? (relTime(when, now) || '—')
+  const cols = opts.columns && opts.columns.length > 0 ? facetLayout(opts.columns, textX) : []
+  const titleEnd = cols[0] ? cols[0].x - 12 : 686
 
   return svg(
     h,
@@ -438,7 +489,8 @@ export const taskRowSvg = (
       reveal(
         (opts.isPicked ? `<rect x="64" y="2" width="${W - 84}" height="${h - 4}" rx="6" fill="${INK.blueBg}"/>` : '') +
           checkbox(boxX, 7, box) +
-          `<text x="${textX}" y="25" font-size="18" fill="${isDone ? '#555965' : INK.text}">${marked(task.title, 566 - textX + 120, 8.9, opts.mark)}</text>` +
+          `<text x="${textX}" y="25" font-size="18" fill="${isDone ? '#555965' : INK.text}">${marked(task.title, titleEnd - textX, 8.9, opts.mark)}</text>` +
+          cols.map(at => facetCell(at, opts.facets?.find(f => f.key === at.key))).join('') +
           `<rect x="${792 - chipW}" y="4" width="${chipW}" height="28" rx="14" fill="${chipBg}"/>` +
           `<text x="${792 - chipW / 2}" y="24" font-size="16.5" fill="${chipText}" text-anchor="middle">${chip}</text>` +
           `<text x="829" y="25" font-size="18" fill="${INK.grayText}" text-anchor="middle">${esc(time)}</text>`,

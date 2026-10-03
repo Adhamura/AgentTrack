@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { applyLive, itemsOf, parseDoc, tabPaneId } from '../hooks/docs'
+import { applyLive, columnsOf, itemsOf, parseDoc, splitFacets, tabPaneId } from '../hooks/docs'
 import { partial, sameWork } from '../hooks/match'
 import { claudeArgv, compareVersions, findInstalled, installedVersion, lastLine, marketplaceDir, offered, outcomeText, pluginsDirOf, versionOf } from '../hooks/update'
 import { matches, runs, terms } from '../hooks/search'
@@ -529,4 +529,31 @@ test('worktrees of a project count as the project, and running agents get rows w
   expect(syncAgents(once, listed, 20)).toBe(once)
   const done = syncAgents(once, [{ ...listed[0]!, status: 'completed' }], 30)
   expect(done.categories[0]).toMatchObject({ isLive: false, isFinished: true })
+})
+
+test('a line written as name — part, part gets a column per part, done unless it says no', async () => {
+  expect(splitFacets('cg-alms-vault — not dressed (0 props), no art')).toEqual({
+    name: 'cg-alms-vault',
+    facets: [
+      { key: 'dressed', label: 'not dressed (0 props)', isDone: false },
+      { key: 'art', label: 'no art', isDone: false },
+    ],
+  })
+  expect(splitFacets('cg-x — dressed (3 props), art')?.facets.map(f => f.isDone)).toEqual([true, true])
+  expect(splitFacets('Plain line without parts')).toBeUndefined()
+  const text = [
+    '## Act I',
+    '### 1.1 Chapel Gate',
+    '- [ ] cg-alms-vault — not dressed (0 props), no art',
+    '- [ ] cg-choir — not built, no art',
+    '## Notes',
+    '- [ ] Story — draft the intro',
+  ].join('\n')
+  const doc = parseDoc(text, { title: 'Art', file: 'a.md' })
+  const group = doc.sections[0]!.groups[0]!
+  expect(group.items.map(i => i.title)).toEqual(['cg-alms-vault', 'cg-choir'])
+  expect(columnsOf(group.items)).toEqual(['dressed', 'art', 'built'])
+  // A list with no line of two parts keeps its names whole.
+  expect(doc.sections[1]!.items[0]).toMatchObject({ title: 'Story — draft the intro' })
+  expect(doc.sections[1]!.items[0]!.facets).toBeUndefined()
 })
