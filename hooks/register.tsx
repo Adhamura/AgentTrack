@@ -75,11 +75,17 @@ const MOTION_MS = 700
 let paneColumns = 80
 /**
  * The label of a Button with nothing visible, laid over a share (0..1) of a
- * drawing's width: figure spaces, which neither wrap nor collapse, about as
- * many as fit in that share of the pane. A label wider than its Button's room
- * is cut with an ellipsis on a desktop, so it stays a little short of the edge.
+ * drawing's width: figure spaces, which neither wrap nor collapse, a little
+ * more than fill that share of the pane, so no edge of the cell is left dead.
  */
-const hit = (share: number) => '\u2007'.repeat(Math.max(2, Math.floor(paneColumns * share * 0.85)))
+const hit = (share: number) => '\u2007'.repeat(Math.max(3, Math.ceil(paneColumns * share * 1.5)))
+/**
+ * The room, in cells, a click target's Button is laid out in: wider than any
+ * pane and centered on the target's cell, so the label always fits whole (a desktop cuts a label
+ * that does not fit with an ellipsis), while the cell's `overflow="hidden"`
+ * clips what spills past its edges, pointer and paint alike.
+ */
+const HIT_ROOM = 400
 /** The width, as a share of a drawn strip, that centers a click target on a chevron drawn at `cx` (of 925). */
 const hitWidth = (cx: number) => `${Math.round((2 * cx * 100) / 925)}%`
 /** A section's progress: the summed items of its rows. */
@@ -134,8 +140,10 @@ const hitRow = (
 
     return [
       <Box key={`gap-${p.key}`} width={`${gap}%`} />,
-      <Box key={`spot-${p.key}`} width={`${to - from}%`} overflow="hidden" alignItems="center" justifyContent="center">
-        <Button key={p.key} plain label={hit(p.w / W)} onPress={p.onPress} />
+      <Box key={`spot-${p.key}`} width={`${to - from}%`} overflow="hidden" flexDirection="row" alignItems="center" justifyContent="center">
+        <Box width={HIT_ROOM} flexShrink={0} flexDirection="row" alignItems="center" justifyContent="center">
+          <Button key={p.key} plain label={hit(p.w / W)} onPress={p.onPress} />
+        </Box>
       </Box>,
     ]
   })
@@ -552,10 +560,13 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
             bottom={0}
             width={hitWidth(cx)}
             overflow="hidden"
+            flexDirection="row"
             alignItems="center"
             justifyContent="center"
           >
-            {left}
+            <Box width={HIT_ROOM} flexShrink={0} flexDirection="row" alignItems="center" justifyContent="center">
+              {left}
+            </Box>
           </Box>
         )}
         {right && (
@@ -984,10 +995,13 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
             bottom={0}
             width={hitWidth(cx)}
             overflow="hidden"
+            flexDirection="row"
             alignItems="center"
             justifyContent="center"
           >
-            {left}
+            <Box width={HIT_ROOM} flexShrink={0} flexDirection="row" alignItems="center" justifyContent="center">
+              {left}
+            </Box>
           </Box>
         )}
         {right && (
