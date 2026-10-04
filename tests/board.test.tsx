@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { applyLive, columnCounts, columnsOf, foundTitle, isChecklist, itemNote, itemsOf, parseDoc, splitFacets, tabPaneId } from '../hooks/docs'
+import { applyLive, columnCounts, columnsOf, foundTitle, isChecklist, isTrackerName, itemNote, itemsOf, parseDoc, splitFacets, tabPaneId } from '../hooks/docs'
 import { emptyRowSvg, layout, useScheme } from '../hooks/look'
 import { partial, sameWork } from '../hooks/match'
 import { claudeArgv, compareVersions, findInstalled, installedVersion, lastLine, marketplaceDir, offered, outcomeText, pluginsDirOf, versionOf } from '../hooks/update'
@@ -651,6 +651,11 @@ test('a Markdown checklist is found by its shape, and a leading BLOCKER stays a 
   ].join('\n')
   expect(isChecklist(steam)).toBe(true)
   expect(isChecklist('# Notes\n- [ ] one\n- [ ] two')).toBe(false)
+  // Only files named as trackers are found: plans and ideas with boxes stay out.
+  expect(['steam-readiness.md', 'art-progress.md', 'roadmap.md', 'launch_checklist.md', 'TODO.md'].map(isTrackerName)).toEqual([true, true, true, true, true])
+  expect(
+    ['04-module-boundaries.md', '32-finishing-act-1-rooms.md', 'story-idea-image-prompts.md', 'combat-enemies-progression-and-saves.md', 'story-and-quest-implementation-status.md'].map(isTrackerName),
+  ).toEqual([false, false, false, false, false])
   expect(foundTitle(steam, 'docs/steam-readiness.md')).toBe('Steam readiness')
   expect(foundTitle('no heading', 'docs/steam-readiness.md')).toBe('steam readiness')
   const doc = parseDoc(steam, { title: 'Steam readiness', file: 'docs/steam-readiness.md' })
@@ -674,14 +679,14 @@ test('a checklist found in docs gets a tab without being listed, before Agents, 
   let steam = ['# Steam readiness', '## 1. Rights', ...[1, 2, 3, 4, 5].map(n => `- [ ] **BLOCKER** Thing ${n}`)].join('\n')
   on('fs.read', ($, e) => {
     if (e.path.endsWith('agent-track.json')) throw new Error('ENOENT')
-    if (e.path.endsWith('docs/steam-readiness.md') || e.path.endsWith('README.md')) return { value: steam }
+    if (e.path.endsWith('docs/steam-readiness.md') || e.path.endsWith('README.md') || e.path.endsWith('04-module-boundaries.md')) return { value: steam }
 
     return { value: '# Notes\n- [ ] one' }
   })
   on('fs.stat', () => ({ value: { kind: 'file', mtimeMs: mtime, size: 1, realPath: '/p' } as never }))
   on('fs.list', ($, e) => ({
     value: (e.path.endsWith('/docs')
-      ? [{ name: 'steam-readiness.md', kind: 'file' }, { name: 'notes.md', kind: 'file' }]
+      ? [{ name: 'steam-readiness.md', kind: 'file' }, { name: 'notes.md', kind: 'file' }, { name: '04-module-boundaries.md', kind: 'file' }]
       : !/\/docs?$/.test(e.path)
         ? [{ name: 'README.md', kind: 'file' }]
         : []) as never,

@@ -35,7 +35,7 @@ import {
   syncAgents,
 } from './board'
 import type { Filter, Scope, SectionId, Summary, TodoItem } from './board'
-import { CONFIG_FILE, NOT_FOUND, applyLive, foundTitle, isChecklist, countsFor, groupAsCategory, itemAsTask, itemNote, itemsOf, parseConfig, parseDoc, sectionColumns, tabPaneId } from './docs'
+import { CONFIG_FILE, NOT_FOUND, applyLive, foundTitle, isChecklist, isTrackerName, countsFor, groupAsCategory, itemAsTask, itemNote, itemsOf, parseConfig, parseDoc, sectionColumns, tabPaneId } from './docs'
 import type { DocTab } from './docs'
 import {
   REFRESH_MS,
@@ -734,8 +734,9 @@ const pickScope = async ($: $, picked: Scope) => {
 const FOUND_DIRS = ['.', 'docs', 'doc'] as const
 
 /**
- * The project's Markdown files shaped like checklists (`isChecklist`) that
- * the config does not list already: each becomes a tab of its own.
+ * The project's Markdown files named as trackers (`isTrackerName`) and shaped
+ * like checklists (`isChecklist`) that the config does not list already:
+ * each becomes a tab of its own.
  */
 const findChecklists = async ($: $, listed: readonly DocTab[]): Promise<DocTab[]> => {
   const known = new Set(listed.map(t => t.file.replace(/^\.\//, '').toLowerCase()))
@@ -748,7 +749,7 @@ const findChecklists = async ($: $, listed: readonly DocTab[]): Promise<DocTab[]
       continue
     }
     for (const f of entries) {
-      if (f.kind !== 'file' || !/\.md$/i.test(f.name) || NOT_FOUND.test(f.name)) continue
+      if (f.kind !== 'file' || !/\.md$/i.test(f.name) || NOT_FOUND.test(f.name) || !isTrackerName(f.name)) continue
       const file = dir === '.' ? f.name : `${dir}/${f.name}`
       if (known.has(file.toLowerCase())) continue
       try {

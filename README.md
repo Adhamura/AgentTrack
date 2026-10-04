@@ -183,7 +183,7 @@ The desktop app may not list `/agent-track` in its suggestions; type the whole c
 
 ## Project checklists
 
-Your project's own checklists, anything in Markdown with `- [ ]` boxes, each get a tab before **Agents**, in the same design. List them in [`.claude/agent-track.json`](#agent-trackjson), or just save them: a Markdown file in the project's folder, `docs/` or `doc/` with at least 5 boxes under `##` headings gets a tab by itself, named after its `#` heading (README, CHANGELOG, CLAUDE and similar files are skipped). A new file shows up as soon as an agent writes it, or after `/agent-track reload`.
+Your project's own checklists, anything in Markdown with `- [ ]` boxes, each get a tab before **Agents**, in the same design. List them in [`.claude/agent-track.json`](#agent-trackjson), or just save them: a Markdown file in the project's folder, `docs/` or `doc/` whose name says it tracks progress (`steam-readiness.md`, `art-progress.md`, `roadmap.md`, `launch-checklist.md`, `todo.md`: the words *progress*, *readiness*, *ready*, *roadmap*, *checklist*, *tracker*, *milestones* or *todo*) and that has at least 5 boxes under `##` headings gets a tab by itself, named after its `#` heading. Plans and notes that only happen to hold boxes stay out. A new file shows up as soon as an agent writes it, or after `/agent-track reload`.
 
 For example, an excerpt of `docs/art-progress.md`:
 

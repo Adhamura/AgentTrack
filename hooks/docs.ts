@@ -94,6 +94,17 @@ export const isChecklist = (text: string): boolean => {
 export const foundTitle = (text: string, file: string): string =>
   /^#\s+(.+)$/m.exec(text)?.[1]?.trim() || (file.split('/').pop() ?? file).replace(/\.md$/i, '').replace(/[-_]+/g, ' ')
 
+/**
+ * Whether a file's name says it tracks progress (`steam-readiness.md`,
+ * `art-progress.md`, `roadmap.md`, `launch-checklist.md`): only those are
+ * found by shape, so plans and notes that happen to hold boxes stay out.
+ * Whole words only: `progression` is not `progress`.
+ */
+export const isTrackerName = (file: string): boolean =>
+  /(^|[-_. ])(progress|readiness|ready|roadmap|checklist|tracker|tracking|milestones?|todo|todos)([-_. ]|$)/i.test(
+    (file.split('/').pop() ?? file).replace(/\.md$/i, ''),
+  )
+
 /** Files never taken as a found checklist: the project's own notes about itself. */
 export const NOT_FOUND = /^(readme|changelog|claude|agents|contributing|license|code_of_conduct|security)\.md$/i
 
