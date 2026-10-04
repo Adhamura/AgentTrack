@@ -16,18 +16,22 @@ export type DocTab = {
   keepEmptySections?: boolean
   /** Regular expressions removed from every heading, such as `\s*\(outside request[^)]*\)`. */
   strip?: string[]
+  /** Found in the project by its shape (see `isChecklist`), not listed in the config. */
+  isFound?: boolean
 }
 
-export type DocConfig = { tabs: DocTab[] }
+/** `discover: false` turns off the tabs found by shape; listed tabs always show. */
+export type DocConfig = { tabs: DocTab[]; discover: boolean }
 
 /** Where a project lists its tabs, relative to the project folder. */
 export const CONFIG_FILE = '.claude/agent-track.json'
 
 export const parseConfig = (text: string): DocConfig => {
-  const raw = JSON.parse(text) as { tabs?: unknown }
+  const raw = JSON.parse(text) as { tabs?: unknown; discover?: unknown }
   const tabs = Array.isArray(raw.tabs) ? raw.tabs : []
 
   return {
+    discover: raw.discover !== false,
     tabs: tabs.flatMap((t): DocTab[] => {
       const tab = t as Partial<DocTab>
       if (typeof tab.title !== 'string' || typeof tab.file !== 'string') return []
@@ -50,13 +54,48 @@ export const tabPaneId = (tab: DocTab) =>
 
 const ITEM = /^\s*[-*]\s+\[([ xX~/-])\]\s+(.*)$/
 
-/** The item's name: its bold part when it has one, else its first 70 characters. */
-const nameOf = (text: string) => {
-  const bold = /\*\*(.+?)\*\*/.exec(text)?.[1]
-  const plain = (bold ?? text).replace(/`/g, '').replace(/\s+/g, ' ').trim().replace(/\.$/, '')
+/** A leading tag in capitals, such as `**BLOCKER**` or `**P0**`: a label, not the item's name. */
+const TAG = /^\*\*([A-Z][A-Z0-9 _-]{0,15})\*\*:?\s+(?=\S)/
 
-  return plain.length > 70 ? `${plain.slice(0, 69).trimEnd()}…` : plain
+/**
+ * The item's name: its bold part when it has one, else its first 70
+ * characters. A leading tag in capitals stays in front of the name
+ * (`BLOCKER: Original hero rig…`) instead of becoming the whole name.
+ */
+const nameOf = (text: string): string => {
+  const tag = TAG.exec(text)
+  if (tag) return cut(`${tag[1]}: ${nameOf(text.slice(tag[0].length))}`)
+  const bold = /\*\*(.+?)\*\*/.exec(text)?.[1]
+
+  return cut((bold ?? text).replace(/`/g, '').replace(/\s+/g, ' ').trim().replace(/\.$/, ''))
 }
+const cut = (s: string) => (s.length > 70 ? `${s.slice(0, 69).trimEnd()}…` : s)
+
+/** How many boxes a file needs under its `##` sections to be found as a checklist. */
+export const FOUND_MIN_ITEMS = 5
+
+/**
+ * Whether a Markdown file is a checklist the board can show on its own: it
+ * has `##` sections with at least FOUND_MIN_ITEMS boxes under them.
+ */
+export const isChecklist = (text: string): boolean => {
+  let isInSection = false
+  let n = 0
+  for (const line of text.split(/\r?\n/)) {
+    if (/^##\s/.test(line)) isInSection = true
+    else if (/^#\s/.test(line)) isInSection = false
+    else if (isInSection && ITEM.test(line) && ++n >= FOUND_MIN_ITEMS) return true
+  }
+
+  return false
+}
+
+/** A found checklist's tab label: its `#` heading, else its file name. */
+export const foundTitle = (text: string, file: string): string =>
+  /^#\s+(.+)$/m.exec(text)?.[1]?.trim() || (file.split('/').pop() ?? file).replace(/\.md$/i, '').replace(/[-_]+/g, ' ')
+
+/** Files never taken as a found checklist: the project's own notes about itself. */
+export const NOT_FOUND = /^(readme|changelog|claude|agents|contributing|license|code_of_conduct|security)\.md$/i
 
 /** Words that say a part is not done yet. */
 const NOT_DONE = /\b(no|not|none|missing|without|todo|tbd|pending|needs?|wip)\b|\bn\/a\b|(^|\()\s*0\b/i

@@ -35,7 +35,7 @@ import {
   syncAgents,
 } from './board'
 import type { Filter, Scope, SectionId, Summary, TodoItem } from './board'
-import { CONFIG_FILE, applyLive, countsFor, groupAsCategory, itemAsTask, itemNote, itemsOf, parseConfig, parseDoc, sectionColumns, tabPaneId } from './docs'
+import { CONFIG_FILE, NOT_FOUND, applyLive, foundTitle, isChecklist, countsFor, groupAsCategory, itemAsTask, itemNote, itemsOf, parseConfig, parseDoc, sectionColumns, tabPaneId } from './docs'
 import type { DocTab } from './docs'
 import {
   REFRESH_MS,
@@ -252,7 +252,7 @@ const tabList = async ($: $): Promise<TabSpec[]> => {
     ...docCtx.tabs.map(tab => {
       const id = tabPaneId(tab)
       const raw = all[id]
-      const c = raw && !raw.error ? countTasks(applyLive(raw, live).sections.flatMap(itemsOf).map(itemAsTask(raw.updatedAt))) : undefined
+      const c = raw && !raw.error ? liveDoc(id, raw, live).counts : undefined
 
       return { id, title: tab.title, percent: c?.percent }
     }),
@@ -679,6 +679,25 @@ const docCtx = { tabs: [] as DocTab[], seen: {} as Record<string, number>, proje
 const DOC_SPAN = 7 * 24 * 60 * 60 * 1000
 
 /**
+ * Each tab's checklist with running work matched in, and its counts, kept
+ * per tab until its file or the running work changes: switching tabs and
+ * redrawing reuse them instead of matching every line again.
+ */
+const liveCache = new Map<string, { key: string; doc: DocBoard; counts: ReturnType<typeof countTasks> }>()
+const liveDoc = (pane: string, raw: DocBoard, live: readonly string[]) => {
+  // The file's time and its lines' names and marks: a cheap fingerprint of what it says.
+  const lines = raw.sections.flatMap(itemsOf).map(i => `${i.status[0]}${i.title}`)
+  const key = `${raw.updatedAt}|${raw.sections.map(x => x.title).join('|')}|${lines.join('|')}|${live.join('\u0000')}`
+  const hit = liveCache.get(pane)
+  if (hit?.key === key && hit.doc.title === raw.title) return hit
+  const doc = applyLive(raw, live)
+  const entry = { key, doc, counts: countTasks(doc.sections.flatMap(itemsOf).map(itemAsTask(raw.updatedAt))) }
+  liveCache.set(pane, entry)
+
+  return entry
+}
+
+/**
  * This session's project folder: as the session registry names it (written
  * the same way as every other session's there), else the one it started in.
  */
@@ -711,12 +730,49 @@ const pickScope = async ($: $, picked: Scope) => {
   await $.store.set(SCOPE_STORE, picked)
 }
 
+/** Where checklists are looked for by shape: the project's folder and its docs folders. */
+const FOUND_DIRS = ['.', 'docs', 'doc'] as const
+
+/**
+ * The project's Markdown files shaped like checklists (`isChecklist`) that
+ * the config does not list already: each becomes a tab of its own.
+ */
+const findChecklists = async ($: $, listed: readonly DocTab[]): Promise<DocTab[]> => {
+  const known = new Set(listed.map(t => t.file.replace(/^\.\//, '').toLowerCase()))
+  const found: DocTab[] = []
+  for (const dir of FOUND_DIRS) {
+    let entries: Awaited<ReturnType<$['fs']['list']>> = []
+    try {
+      entries = await $.fs.list(dir)
+    } catch {
+      continue
+    }
+    for (const f of entries) {
+      if (f.kind !== 'file' || !/\.md$/i.test(f.name) || NOT_FOUND.test(f.name)) continue
+      const file = dir === '.' ? f.name : `${dir}/${f.name}`
+      if (known.has(file.toLowerCase())) continue
+      try {
+        const text = await $.fs.read(file)
+        if (isChecklist(text)) found.push({ title: foundTitle(text, file), file, isFound: true })
+      } catch {
+        // Unreadable: not a tab.
+      }
+    }
+  }
+
+  return found.sort((a, b) => a.title.localeCompare(b.title))
+}
+
 const loadDocConfig = async ($: $) => {
+  let discover = true
   try {
-    docCtx.tabs = parseConfig(await $.fs.read(CONFIG_FILE)).tabs
+    const config = parseConfig(await $.fs.read(CONFIG_FILE))
+    docCtx.tabs = config.tabs
+    discover = config.discover
   } catch {
     docCtx.tabs = []
   }
+  if (discover) docCtx.tabs = [...docCtx.tabs, ...(await findChecklists($, docCtx.tabs))]
   try {
     docCtx.project = (await $.fs.stat('.', { resolve: true })).realPath ?? ''
   } catch {
@@ -763,8 +819,10 @@ const refreshDocs = async ($: $, force = false) => {
 }
 
 const reread = async ($: $, said: string) => {
-  if (said.includes('agent-track.json')) await loadDocConfig($)
-  if (said.includes('agent-track.json') || docCtx.tabs.some(t => said.includes(t.file.split('/').pop() ?? t.file))) {
+  // A Markdown file written that no tab shows yet may be a new checklist: look again.
+  const isNewMd = /\.md\b/i.test(said) && !docCtx.tabs.some(t => said.includes(t.file.split('/').pop() ?? t.file))
+  if (said.includes('agent-track.json') || isNewMd) await loadDocConfig($)
+  if (said.includes('agent-track.json') || isNewMd || docCtx.tabs.some(t => said.includes(t.file.split('/').pop() ?? t.file))) {
     await refreshDocs($, true)
   }
 }
@@ -1199,7 +1257,7 @@ const itemAlt = (item: DocItem) =>
 const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
   const raw = (await read($, docs))[pane]
   if (!raw) return undefined
-  const doc = applyLive(raw, await read($, liveWork))
+  const doc = liveDoc(pane, raw, await read($, liveWork)).doc
   const els = $.ui.resolve(e)
   const { Box, Text, Button } = els
   const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
@@ -1702,7 +1760,8 @@ export const register: Register = (on, options) => {
     await loadDocConfig($)
     await refreshDocs($, true)
     await closeOldTabs($)
-    if (docCtx.tabs.length > 0) await autoOpen($)
+    // Tabs the project lists open the board; ones only found by shape wait to be asked for.
+    if (docCtx.tabs.some(t => !t.isFound)) await autoOpen($)
     // An unload (the next reload) ends its waits: nothing is left to draw then.
     void redrawAfterLoad($).catch(() => undefined)
     $.clock.every(3_000, () => {
@@ -1737,7 +1796,7 @@ export const register: Register = (on, options) => {
     const tabs = Object.entries(await read($, docs)).flatMap(([id, raw]) => {
       const tab = docCtx.tabs.find(t => tabPaneId(t) === id)
       if (!tab || raw.error) return []
-      const c = countTasks(applyLive(raw, live).sections.flatMap(itemsOf).map(itemAsTask(raw.updatedAt)))
+      const c = liveDoc(id, raw, live).counts
 
       return [`${tab.title} ${c.percent}%`]
     })
