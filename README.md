@@ -255,7 +255,7 @@ At the top level, `"hide": ["docs/feature-progress.md"]` keeps those files from 
 
 After editing the list, run `/agent-track reload`.
 
-Each tab is read again only when its file changes (checked every 3 seconds, and right after an agent edits it); switching tabs and redrawing reuse what was read and matched.
+Tabs are read and prepared in the background: each file is read again only when it changes (checked every 3 seconds, and right after an agent edits it), and the board draws only what is ready, so switching tabs never waits. A tab still being prepared shows a turning ring, and a tab whose file just changed says so in green for a few seconds (*Updated from the file · 2 lines changed*). A long checklist (over 40 items) opens only the sections where something is in progress; press a section to open it.
 
 ### Settings
 

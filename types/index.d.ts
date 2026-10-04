@@ -115,6 +115,8 @@ declare module 'claude-code' {
       scope: 'session' | 'project' | 'all'
       /** The Agents tab's percent for the tab bar and the bar above the prompt; null with no tasks. */
       agentsPct: number | null
+      /** Bumped when a tab was prepared again in the background, so the board draws it. */
+      preparedRev: number
     }
   }
 }

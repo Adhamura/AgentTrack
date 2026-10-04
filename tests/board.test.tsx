@@ -710,5 +710,44 @@ test('a checklist found in docs gets a tab without being listed, before Agents, 
   mtime = 2000
   await clock.advance(3_100)
   expect(await tabLabel()).toMatch(/20%/)
+  // Its tab says so in green for a few seconds.
+  await ui.press({ key: 'tab-agent-track-steam-readiness' })
+  expect(await ui.find({ text: /Updated from the file · 1 line changed/ })).toBeDefined()
+  await clock.advance(6_500)
+  expect(await ui.find({ text: /Updated from the file/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a long checklist is drawn as a few images and opens only where work is in progress', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  on('agent.list', () => ({ value: [] }))
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  const lines = ['# Steam readiness']
+  for (let s = 1; s <= 15; s++) {
+    lines.push(`## ${s}. Section ${s}`)
+    for (let i = 0; i < 7; i++) lines.push(`- [${i === 0 ? 'x' : s === 2 && i === 1 ? '~' : ' '}] **BLOCKER** Item ${s}.${i}`)
+  }
+  on('fs.read', ($, e) => ({
+    value: e.path.endsWith('agent-track.json') ? JSON.stringify({ tabs: [{ title: 'Steam', file: 'docs/steam-readiness.md' }] }) : lines.join('\n'),
+  }))
+  on('fs.write', () => ({ value: undefined }) as never)
+  on('fs.stat', () => ({ value: { kind: 'file', mtimeMs: 1000, size: 1, realPath: '/p' } as never }))
+  on('fs.list', () => ({ value: [] }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }) as never)
+  on('tool.register', () => ({ value: { tool: 'mcp__agent-track__todo' } }))
+  on('command.register', () => ({ value: { command: 'agent-track' } }))
+  on('session.start', ($, e) => e as never)
+  on('env.get', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'me' }))
+  await $.session.start({ cwd: '/p', surface: 'desktop', isInteractive: true } as never)
+  const ui = await $.ui.mount({ plugin: 'agent-track', surface: 'desktop', ...PANE, props: paneProps as never })
+  await ui.press({ key: 'tab-agent-track-steam' })
+  // Only section 2 has an item in progress: it alone starts open.
+  const items = (await ui.findAll({ type: 'Button' })).map(b => String(b.key)).filter(k => k.startsWith('item-'))
+  expect(items.length).toBe(7)
+  // Fifteen section heads and seven rows, stacked: a handful of images, not one per row.
+  expect((await ui.findAll({ type: 'Svg' })).length).toBeLessThan(10)
   await ui.unmount()
 })

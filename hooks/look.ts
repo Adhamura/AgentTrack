@@ -150,6 +150,50 @@ const svg = (w: number, h: number, body: string) => {
   )
 }
 
+/**
+ * Several drawn strips as ONE drawing, each nested at its height in order:
+ * one image for the surface to lay out and paint instead of one per row.
+ * Their dark-mode rules are gathered once at the top.
+ */
+export const stackSvg = (w: number, parts: readonly { svg: string; h: number }[]) => {
+  const styles = new Set<string>()
+  let y = 0
+  const body = parts
+    .map(p => {
+      const inner = p.svg.replace(/<style>(.*?)<\/style>/g, (_, css: string) => (styles.add(css), ''))
+      const nested = inner.replace(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" /, `<svg y="${y}" `)
+      y += p.h
+
+      return nested
+    })
+    .join('')
+
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${y}" viewBox="0 0 ${w} ${y}" font-family="${SANS}">` +
+    [...styles].map(css => `<style>${css}</style>`).join('') +
+    body +
+    `</svg>`
+  )
+}
+
+/** Empty room between stacked strips, such as the gap between two sections. */
+export const blankSvg = (w: number, h: number) => svg(w, h, '')
+
+/** A loading ring turning in the middle of a strip, with a line under it. */
+export const loadingSvg = (lay: Layout, label: string) => {
+  const h = 160
+  const cx = lay.w / 2
+
+  return svg(
+    lay.w,
+    h,
+    `<circle cx="${cx}" cy="62" r="16" stroke-width="3" ${paint(undefined, 'track')}/>` +
+      `<path d="M${cx},46 A16,16 0 0 1 ${cx + 16},62" fill="none" stroke-width="3" stroke-linecap="round" ${paint(undefined, 'active')}>` +
+      `<animateTransform attributeName="transform" type="rotate" from="0 ${cx} 62" to="360 ${cx} 62" dur="0.9s" repeatCount="indefinite"/></path>` +
+      `<text x="${cx}" y="112" font-size="13" text-anchor="middle" ${paint('sub')}>${esc(label)}</text>`,
+  )
+}
+
 /* ------------------------------------------------------------------ text */
 
 const ADV: Record<string, number> = {}
