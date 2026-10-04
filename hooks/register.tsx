@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
-import type { Category, DocBoard, DocItem, Peer, Snapshot, Task, TaskStatus } from '../types'
+import type { Category, DocBoard, DocItem, DocSection, Peer, Snapshot, Task, TaskStatus } from '../types'
 import {
   MAIN,
   ago,
@@ -76,6 +76,9 @@ import {
   detailClose,
   detailH,
   detailSvg,
+  loadingSvg,
+  blankSvg,
+  stackSvg,
   emptyRowSvg,
   headerSvg,
   maxColumns,
@@ -237,12 +240,67 @@ const hitRow = (els: Els, w: number, height: number, top: number, band: number, 
   hitBands(els, w, height, [{ top, band, spots }])
 
 /** One drawn strip, with click targets over the whole of its height. */
-const strip = (els: Els, Art: SvgEl, lay: Layout, height: number, source: string, alt: string, spots: readonly Spot[] = []) => (
-  <els.Box flexDirection="column">
-    <Art source={source} alt={alt} />
-    {spots.length > 0 && hitRow(els, lay.w, height, 0, height, spots)}
-  </els.Box>
-)
+/** The room between two stacked sections. */
+const SECTION_GAP = 14
+const sectionGap = (lay: Layout): Piece => ({ isPiece: true, svg: blankSvg(lay.w, SECTION_GAP), h: SECTION_GAP, alt: '', spots: [] })
+
+/** One drawn strip waiting to be stacked with its neighbors (`stack`): its drawing, height, words and click targets. */
+type Piece = { isPiece: true; svg: string; h: number; alt: string; spots: readonly Spot[] }
+const strip = (_els: Els, _Art: SvgEl, _lay: Layout, height: number, source: string, alt: string, spots: readonly Spot[] = []): Piece => ({
+  isPiece: true,
+  svg: source,
+  h: height,
+  alt,
+  spots,
+})
+const isPiece = (x: unknown): x is Piece => typeof x === 'object' && x !== null && (x as Piece).isPiece === true
+
+/**
+ * The most a stacked drawing grows before a new one starts: its click
+ * targets sit at whole percents of its height, so a taller one would let
+ * them drift off their rows (about 3 px off at most here).
+ */
+const STACK_MAX_H = 600
+
+/**
+ * Strips and other elements in order, consecutive strips drawn as ONE image
+ * with ONE layer of click targets (a band per strip): a long list costs the
+ * surface a few images instead of one per row.
+ */
+const stack = (els: Els, Art: SvgEl, lay: Layout, key: string, items: readonly (Piece | JSX.Element | null | false)[]) => {
+  const out: JSX.Element[] = []
+  let run: Piece[] = []
+  const flush = () => {
+    if (run.length === 0) return
+    let top = 0
+    const bands = run.map(p => {
+      const band = { top, band: p.h, spots: p.spots }
+      top += p.h
+
+      return band
+    })
+    out.push(
+      <els.Box key={`${key}-stack-${out.length}`} flexDirection="column">
+        <Art source={stackSvg(lay.w, run)} alt={run.map(p => p.alt).join(' ')} />
+        {bands.some(b => b.spots.length > 0) && hitBands(els, lay.w, top, bands)}
+      </els.Box>,
+    )
+    run = []
+  }
+  for (const item of items) {
+    if (!item) continue
+    if (isPiece(item)) {
+      if (run.length > 0 && run.reduce((a, p) => a + p.h, 0) + item.h > STACK_MAX_H) flush()
+      run.push(item)
+    } else {
+      flush()
+      out.push(item)
+    }
+  }
+  flush()
+
+  return out
+}
 
 /** "2 of 4 done": a count as a reader hears it. */
 const ofDone = (done: number, total: number) => `${done} of ${total} done`
@@ -276,14 +334,13 @@ const scopeSpots = ($: $, at: readonly { id: Scope; x: number; w: number }[]): S
 /** The board's tabs: each project checklist, then Agents last, each with its percent. */
 const tabList = async ($: $): Promise<TabSpec[]> => {
   const pct = await read($, agentsPct)
-  const live = await read($, liveWork)
-  const all = await read($, docs)
+  await read($, preparedRev)
 
   return [
     ...docCtx.tabs.map(tab => {
       const id = tabPaneId(tab)
-      const raw = all[id]
-      const c = raw && !raw.error ? liveDoc(id, raw, live).counts : undefined
+      const p = prepared.get(id)
+      const c = p && !p.doc.error ? p.counts : undefined
 
       return { id, title: tab.title, percent: c?.percent }
     }),
@@ -722,15 +779,17 @@ const docCtx = {
   queue: Promise.resolve() as Promise<unknown>,
 }
 
-/** Runs doc work after the job before it; a failure never blocks the next. */
+/** Runs doc work after the job before it; a failure (or an unload mid-job) never blocks the next, nor escapes. */
 const serial = (job: () => Promise<unknown>) => {
-  const run = docCtx.queue.then(job, job)
-  docCtx.queue = run.catch(() => undefined)
+  const run = docCtx.queue.then(job, job).catch(() => undefined)
+  docCtx.queue = run
 
   return run
 }
 
 const DOC_SPAN = 7 * 24 * 60 * 60 * 1000
+/** A checklist longer than this starts with only its sections in progress open. */
+const LONG_DOC_ITEMS = 40
 
 /**
  * Each tab's checklist with running work matched in, and its counts, kept
@@ -749,6 +808,67 @@ const liveDoc = (pane: string, raw: DocBoard, live: readonly string[]) => {
   liveCache.set(pane, entry)
 
   return entry
+}
+
+/**
+ * Each tab as the board draws it, prepared in the background (`prepareDocs`):
+ * its checklist with running work matched in, and its counts. Drawing only
+ * reads these, so switching tabs never waits on reading or matching; a tab
+ * not prepared yet shows a loading ring.
+ */
+const prepared = new Map<string, { doc: DocBoard; counts: ReturnType<typeof countTasks> }>()
+/** Bumped when a prepared tab changes, so the board draws it; read by the drawings that show prepared tabs. */
+const preparedRev = atom({ plugin: 'agent-track', key: 'preparedRev' } as const, 0)
+/** When each tab's file last changed while shown, and how many of its lines changed: the green "Updated" line. */
+const changed = new Map<string, { at: number; lines: number }>()
+/** How long the green "Updated" line stays. */
+const CHANGED_MS = 6_000
+
+/** How many lines differ between two versions of a checklist: added, removed, or with a new mark. */
+const linesChanged = (before: DocBoard, after: DocBoard) => {
+  const marks = (d: DocBoard) => new Map(d.sections.flatMap(itemsOf).map(i => [`${i.id}|${i.title}`, i.status]))
+  const [a, b] = [marks(before), marks(after)]
+  let n = 0
+  for (const [k, v] of b) if (a.get(k) !== v) n++
+  for (const k of a.keys()) if (!b.has(k)) n++
+
+  return n
+}
+
+/**
+ * Prepares every tab whose file or matched work changed since it was last
+ * prepared, then has the board drawn once. Runs from the timers and after a
+ * re-read, never while drawing.
+ */
+const prepareDocs = async ($: $) => {
+  const all = await read($, docs)
+  const live = await read($, liveWork)
+  let isChanged = false
+  for (const tab of docCtx.tabs) {
+    const id = tabPaneId(tab)
+    const raw = all[id]
+    if (!raw) continue
+    const before = prepared.get(id)
+    const next = liveDoc(id, raw, live)
+    if (before && before.doc === next.doc) continue
+    if (before && before.doc.updatedAt !== raw.updatedAt && !raw.error) {
+      const lines = linesChanged(before.doc, next.doc)
+      if (lines > 0) changed.set(id, { at: await $.clock.now(), lines })
+    }
+    prepared.set(id, { doc: next.doc, counts: next.counts })
+    isChanged = true
+  }
+  if (!isChanged) return
+  await update($, preparedRev, n => n + 1)
+  if ([...changed.values()].some(c => c.lines > 0)) void hideChanged($).catch(() => undefined)
+}
+
+/** Draws the board again once the green "Updated" lines have had their time. */
+const hideChanged = async ($: $) => {
+  await $.clock.sleep(CHANGED_MS + 100)
+  const now = await $.clock.now()
+  for (const [id, c] of changed) if (now - c.at >= CHANGED_MS) changed.delete(id)
+  await update($, preparedRev, n => n + 1)
 }
 
 /**
@@ -915,23 +1035,33 @@ const refreshLive = async ($: $) => {
   const others = (await read($, scope)) === 'session' ? [] : peerWork(scopedPeers('project', await read($, peers), projectDir()))
   const list = [...new Set([...agents, ...todos, ...others].map(t => t.trim()).filter(t => t.length > 0))].sort()
   const was = await read($, liveWork)
-  if (list.join('|') !== was.join('|')) await update($, liveWork, () => list)
+  if (list.join('|') !== was.join('|')) {
+    await update($, liveWork, () => list)
+    await serial(() => prepareDocs($))
+  }
 }
 
 /** Opens every tab of the board (Agents and the project's), or closes them when any is open. */
 const toggleBoard = async ($: $, reload: boolean) => {
-  await loadDocConfig($)
-  await refreshDocs($, true)
-  await closeOldTabs($)
   if (!reload && (await isUp($))) {
     await $.ui.close({ id: PANE })
 
     return 'Progress board hidden.'
   }
   await update($, dismissed, () => false)
+  // Open at once; the tabs are read and prepared behind it (a tab not ready yet shows a loading ring).
   await $.ui.open({ id: PANE, title: PANE_TITLE })
+  void serial(() => reloadDocs($, true))
 
-  return `Progress board shown: ${[...docCtx.tabs.map(t => t.title), TITLE].join(', ')}.`
+  return reload ? 'Progress board: reading the tab list again.' : 'Progress board shown.'
+}
+
+/** Reads the tab list and every tab's file again, then prepares them for drawing. */
+const reloadDocs = async ($: $, force: boolean) => {
+  await loadDocConfig($)
+  await refreshDocs($, force)
+  await closeOldTabs($)
+  await prepareDocs($)
 }
 
 /** Closes the separate pane each project tab had before 1.2.0, when one is still open. */
@@ -1073,9 +1203,9 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
       const sectionMotion = motionOf(key, isOpen)
       const cats = listed(section.id, section.categories)
       const withShowAll = hasShowAll(section.id, section.categories)
-      const rows: JSX.Element[] = []
+      const rows: (Piece | JSX.Element)[] = []
       if (isOpen && section.categories.length === 0) {
-        rows.push(<Art key={`none-${section.id}`} source={emptyRowSvg(lay, section.empty, { order: sectionMotion ? 0 : undefined })} alt={section.empty} />)
+        rows.push(strip(els, Art, lay, EMPTY_H, emptyRowSvg(lay, section.empty, { order: sectionMotion ? 0 : undefined }), section.empty))
       }
       if (isOpen) {
         cats.forEach((cat, i) => {
@@ -1120,13 +1250,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
           const isReveal = foldMotion === 'open'
           if (tasksShown.length === 0) {
             if (!isFiltered) {
-              rows.push(
-                <Art
-                  key={`none-${cat.id}`}
-                  source={emptyRowSvg(lay, 'No tasks yet.', { isLast, indent: lay.taskX, order: isReveal ? 0 : undefined })}
-                  alt="No tasks yet."
-                />,
-              )
+              rows.push(strip(els, Art, lay, EMPTY_H, emptyRowSvg(lay, 'No tasks yet.', { isLast, indent: lay.taskX, order: isReveal ? 0 : undefined }), 'No tasks yet.'))
             }
 
             return
@@ -1167,8 +1291,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
       }
 
       return (
-        <Box key={`sec-${section.id}`} flexDirection="column" marginBottom={1}>
-          {strip(
+        [strip(
             els,
             Art,
             lay,
@@ -1184,9 +1307,10 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
             }),
             `${section.title}: ${section.categories.length} ${section.categories.length === 1 ? 'row' : 'rows'}, ${ofDone(prog.done, prog.total)}. ${isOpen ? 'Expanded' : 'Collapsed'}.`,
             [{ key: `head-${section.id}`, x: 0, w: lay.w, onPress: () => toggle(key, !isOpen) }],
-          )}
-          {rows}
-        </Box>
+          ),
+            ...rows,
+          sectionGap(lay),
+        ]
       )
     })
 
@@ -1195,7 +1319,7 @@ const drawAgents = async ($: $, e: RenderInput<'Pane'>) => {
         {header}
         {summaryCard($, els, Art, lay, PANE, sum, filter, picked)}
         {searchBox($, els, PANE, query, 'Search tasks, agents, steps…', true)}
-        {isFiltered && shownSections.length === 0 ? nothingCard($, els, Art, lay, PANE, nothing) : sections}
+        {isFiltered && shownSections.length === 0 ? nothingCard($, els, Art, lay, PANE, nothing) : stack(els, Art, lay, 'sections', sections.flat())}
       </Box>
     )
   }
@@ -1324,9 +1448,9 @@ const itemAlt = (item: DocItem) =>
 
 /** A project tab: one checklist file in the board's design. */
 const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
-  const raw = (await read($, docs))[pane]
-  if (!raw) return undefined
-  const doc = liveDoc(pane, raw, await read($, liveWork)).doc
+  await read($, preparedRev)
+  const doc = prepared.get(pane)?.doc
+  if (!doc) return undefined
   const els = $.ui.resolve(e)
   const { Box, Text, Button } = els
   const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
@@ -1359,7 +1483,16 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
    */
   const sectionKey = (sid: string) => (isFiltered ? `df:${pane}:${sid}` : `d:${pane}:${sid}`)
   const groupKey = (gid: string) => (isFiltered ? `gf:${pane}:${gid}` : `g:${pane}:${gid}`)
-  const sectionOpen = (sid: string, state: SectionId) => (isFiltered || state !== 'done') !== shut.has(sectionKey(sid))
+  /**
+   * Which sections start open: in a long checklist only the ones where
+   * something is in progress, so its first drawing stays small; in a short
+   * one every unfinished one. A press flips the default.
+   */
+  const isLong = all.length > LONG_DOC_ITEMS
+  const startsOpen = (state: SectionId, isActive: boolean) => (isLong ? isActive : state !== 'done')
+  const sectionOpen = (sid: string, state: SectionId, isActive = false) => (isFiltered || startsOpen(state, isActive)) !== shut.has(sectionKey(sid))
+  /** Something in the section runs now: an item in progress, or work matched to its title. */
+  const isActiveSection = (section: DocSection) => section.isLive === true || itemsOf(section).some(i => i.status === 'in_progress')
   const groupOpen = (gid: string) => shut.has(groupKey(gid)) !== isFiltered
   /** The sections and groups the filter leaves, each with only its matching items. */
   const shown = doc.sections
@@ -1429,20 +1562,21 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
           source={headerSvg(lay, { heading: doc.title, subtitle, completions: steps, now, spanMs: DOC_SPAN, caption: 'last 7 days' })}
           alt={`${doc.title}. ${subtitle}`}
         />
+        {changedLine(els, pane, now)}
         {summaryCard($, els, Art, lay, pane, sum, filter)}
         {searchBox($, els, pane, query, 'Search items and details…', true)}
         {isFiltered && shown.length === 0 && nothingCard($, els, Art, lay, pane, nothing)}
-        {shown.map(({ section, items: ownItems, groups }) => {
+        {stack(els, Art, lay, `doc-${pane}`, shown.map(({ section, items: ownItems, groups }) => {
           const items = itemsOf(section)
           const state = stateOf(items, section.isLive)
           const key = sectionKey(section.id)
-          const isOpen = sectionOpen(section.id, state)
+          const isOpen = sectionOpen(section.id, state, isActiveSection(section))
           const sectionMotion = motionOf(key, isOpen)
           const c = countTasks(items.map(asTask))
           const { keys, widest } = columnsOfSection(section)
           const plan = planColumns(lay, keys, widest)
           const ownHasParts = section.items.some(i => i.facets)
-          const rows: JSX.Element[] = []
+          const rows: (Piece | JSX.Element)[] = []
           if (isOpen) {
             ownItems.forEach((item, j) => {
               rows.push(
@@ -1502,12 +1636,11 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                 })
               }
             })
-            if (items.length === 0) rows.push(<Art key={`none-${section.id}`} source={emptyRowSvg(lay, 'No checklist items.')} alt="No checklist items." />)
+            if (items.length === 0) rows.push(strip(els, Art, lay, EMPTY_H, emptyRowSvg(lay, 'No checklist items.'), 'No checklist items.'))
           }
 
-          return (
-            <Box key={`doc-${pane}-${section.id}`} flexDirection="column" marginBottom={1}>
-              {strip(
+          return [
+              strip(
                 els,
                 Art,
                 lay,
@@ -1525,11 +1658,12 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
                 }),
                 `${section.title}: ${ofDone(c.done, c.total)}. ${isOpen ? 'Expanded' : 'Collapsed'}.`,
                 [{ key: `head-${pane}:${section.id}`, x: 0, w: lay.w, onPress: () => toggle(key, !isOpen) }],
-              )}
-              {rows}
-            </Box>
-          )
-        })}
+              ),
+                ...rows,
+                sectionGap(lay),
+              ]
+        })
+        .flat())}
       </Box>
     )
   }
@@ -1583,6 +1717,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
     <Box flexDirection="column">
       <Text bold>{doc.title}</Text>
       <Text dimColor>{subtitle}</Text>
+      {changedLine(els, pane, now)}
       <Box marginTop={1}>{summaryText($, els, pane, sum, filter)}</Box>
       {searchBox($, els, pane, query, 'Search items and details…', false)}
       {isFiltered && shown.length === 0 && nothingCard($, els, undefined, layout(widthFor(cols)), pane, nothing)}
@@ -1590,7 +1725,7 @@ const drawDoc = async ($: $, e: RenderInput<'Pane'>, pane: string) => {
         const items = itemsOf(section)
         const state = stateOf(items, section.isLive)
         const key = sectionKey(section.id)
-        const isOpen = sectionOpen(section.id, state)
+        const isOpen = sectionOpen(section.id, state, isActiveSection(section))
         const c = countTasks(items.map(asTask))
         const columns = termColumns(section)
         /** The done/total at a row's end, as wide on every row, so the part columns line up. */
@@ -1826,15 +1961,13 @@ export const register: Register = (on, options) => {
     await ensureLoop($, undefined)
     const kept = await $.store.get(SCOPE_STORE)
     if (isScope(kept)) await update($, scope, () => kept)
-    await loadDocConfig($)
-    await refreshDocs($, true)
-    await closeOldTabs($)
+    await serial(() => reloadDocs($, true))
     // Tabs the project lists open the board; ones only found by shape wait to be asked for.
     if (docCtx.tabs.some(t => !t.isFound)) await autoOpen($)
     // An unload (the next reload) ends its waits: nothing is left to draw then.
     void redrawAfterLoad($).catch(() => undefined)
     $.clock.every(3_000, () => {
-      void serial(() => refreshDocs($))
+      void serial(() => refreshDocs($).then(() => prepareDocs($)))
       void refreshLive($)
     })
     $.clock.every(2_000, () => {
@@ -1863,13 +1996,12 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     const pct = await read($, agentsPct)
-    const live = await read($, liveWork)
-    const tabs = Object.entries(await read($, docs)).flatMap(([id, raw]) => {
-      const tab = docCtx.tabs.find(t => tabPaneId(t) === id)
-      if (!tab || raw.error) return []
-      const c = liveDoc(id, raw, live).counts
+    await read($, preparedRev)
+    const tabs = docCtx.tabs.flatMap(tab => {
+      const p = prepared.get(tabPaneId(tab))
+      if (!p || p.doc.error) return []
 
-      return [`${tab.title} ${c.percent}%`]
+      return [`${tab.title} ${p.counts.percent}%`]
     })
     const parts = [...tabs, ...(pct !== null ? [`${TITLE} ${pct}%`] : [])]
     const isUpdating = await read($, updating)
@@ -1895,6 +2027,7 @@ export const register: Register = (on, options) => {
   /** A new theme redraws the board, so its drawings take the new palette. */
   on('config.set', { key: 'theme' }, async ($, e, next) => {
     const set = await next(e)
+    themeSeen = undefined
     $.ui.invalidate('ui.render')
 
     return set
@@ -1945,21 +2078,21 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const ran = await next(e)
     // In the background: the tool's result goes back to the model at once.
-    void serial(() => reread($, e as unknown as Record<string, unknown>))
+    void serial(() => reread($, e as unknown as Record<string, unknown>).then(() => prepareDocs($)))
 
     return ran
   })
   on('tool.call', { tool: 'Write' }, async ($, e, next) => {
     const ran = await next(e)
     // In the background: the tool's result goes back to the model at once.
-    void serial(() => reread($, e as unknown as Record<string, unknown>))
+    void serial(() => reread($, e as unknown as Record<string, unknown>).then(() => prepareDocs($)))
 
     return ran
   })
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
     // In the background: the tool's result goes back to the model at once.
-    void serial(() => reread($, e as unknown as Record<string, unknown>))
+    void serial(() => reread($, e as unknown as Record<string, unknown>).then(() => prepareDocs($)))
 
     return ran
   })
@@ -1967,7 +2100,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'PowerShell' } as unknown as { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
     // In the background: the tool's result goes back to the model at once.
-    void serial(() => reread($, e as unknown as Record<string, unknown>))
+    void serial(() => reread($, e as unknown as Record<string, unknown>).then(() => prepareDocs($)))
 
     return ran
   })
@@ -2056,12 +2189,44 @@ export const register: Register = (on, options) => {
 }
 
 /** The host's theme setting (`dark`, `light`, `auto`…), when the engine lists it. */
+/** The host's theme as last read: read once, and again when the setting changes, never on each drawing. */
+let themeSeen: { value: unknown } | undefined
 const hostTheme = async ($: $) => {
+  if (themeSeen) return themeSeen.value
   try {
-    return (await $.config.list()).find(row => row.key === 'theme')?.value
+    themeSeen = { value: (await $.config.list()).find(row => row.key === 'theme')?.value }
   } catch {
-    return undefined
+    themeSeen = { value: undefined }
   }
+
+  return themeSeen.value
+}
+
+/** A tab still being prepared: a turning ring in the middle, and what it waits for. */
+const loadingView = (els: Els, Art: SvgEl | undefined, title: string) => {
+  const label = `Preparing ${title}…`
+
+  return Art ? (
+    <Art key="loading" source={loadingSvg(layout(widthFor(paneColumns)), label)} alt={label} />
+  ) : (
+    <els.Box key="loading" justifyContent="center" paddingY={1}>
+      <els.Text dimColor>◌ {label}</els.Text>
+    </els.Box>
+  )
+}
+
+/** The green line a tab shows for a few seconds after its file changed. */
+const changedLine = (els: Els, pane: string, now: number) => {
+  const c = changed.get(pane)
+  if (!c || now - c.at >= CHANGED_MS) return null
+
+  return (
+    <els.Box key={`changed-${pane}`} justifyContent="center" marginTop={1}>
+      <els.Text color="success">
+        ✓ Updated from the file · {c.lines} {c.lines === 1 ? 'line' : 'lines'} changed
+      </els.Text>
+    </els.Box>
+  )
 }
 
 /** The board pane's drawing: the tab bar, and the picked tab below it. */
@@ -2077,7 +2242,7 @@ const drawBoard = async ($: $, e: RenderInput<'Pane'>) => {
   const body =
     active.id === PANE
       ? await drawAgents($, e)
-      : ((await drawDoc($, e, active.id)) ?? <Text dimColor>Loading {active.title}…</Text>)
+      : ((await drawDoc($, e, active.id)) ?? loadingView(els, Svg, active.title))
 
   return (
     <Box flexDirection="column" width={Svg ? Math.min(paneColumns, maxColumns()) : undefined}>
