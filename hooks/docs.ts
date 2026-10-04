@@ -20,18 +20,22 @@ export type DocTab = {
   isFound?: boolean
 }
 
-/** `discover: false` turns off the tabs found by shape; listed tabs always show. */
-export type DocConfig = { tabs: DocTab[]; discover: boolean }
+/**
+ * `discover: false` turns off the tabs found by shape, and `hide` names files
+ * never to find (`docs/feature-progress.md`); listed tabs always show.
+ */
+export type DocConfig = { tabs: DocTab[]; discover: boolean; hide: string[] }
 
 /** Where a project lists its tabs, relative to the project folder. */
 export const CONFIG_FILE = '.claude/agent-track.json'
 
 export const parseConfig = (text: string): DocConfig => {
-  const raw = JSON.parse(text) as { tabs?: unknown; discover?: unknown }
+  const raw = JSON.parse(text) as { tabs?: unknown; discover?: unknown; hide?: unknown }
   const tabs = Array.isArray(raw.tabs) ? raw.tabs : []
 
   return {
     discover: raw.discover !== false,
+    hide: Array.isArray(raw.hide) ? raw.hide.filter((h): h is string => typeof h === 'string') : [],
     tabs: tabs.flatMap((t): DocTab[] => {
       const tab = t as Partial<DocTab>
       if (typeof tab.title !== 'string' || typeof tab.file !== 'string') return []
