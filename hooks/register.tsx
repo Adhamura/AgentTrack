@@ -175,34 +175,60 @@ type Spot = { key: string; x: number; w: number; onPress: () => void }
  * each target's own share of the width (whole percents, rounded at each edge
  * so the cells add up without drifting) and the band `top`..`top + band` of its height.
  */
-const hitRow = (els: Els, w: number, height: number, top: number, band: number, spots: readonly Spot[]) => {
+/** One band of click targets: `top`..`top + band` of a drawing's height. */
+type Band = { top: number; band: number; spots: readonly Spot[] }
+
+/**
+ * Click targets over a drawing, in ONE layer: each band a row whose boxes take
+ * each target's share of the drawing's width (whole percents, edges clamped
+ * and increasing so the cells add up to at most 100%). One layer, because a
+ * second absolute layer would lie over the first and take its clicks.
+ */
+const hitBands = (els: Els, w: number, height: number, bands: readonly Band[]) => {
   const { Box, Button } = els
   const at = (px: number) => Math.max(0, Math.min(100, Math.round((px * 100) / w)))
-  let end = 0
-  const cells = spots.flatMap(p => {
-    const [from, to] = [Math.max(end, at(p.x)), at(p.x + p.w)]
-    const gap = from - end
-    end = to
+  const pctH = (px: number) => Math.max(0, Math.min(100, Math.round((px * 100) / height)))
+  const sorted = [...bands].filter(b => b.spots.length > 0).sort((a, b) => a.top - b.top)
+  let usedH = 0
+  const rows = sorted.flatMap((b, i) => {
+    const top = Math.max(usedH, pctH(b.top))
+    const bottom = Math.max(top, Math.min(100, pctH(b.top + b.band)))
+    const gapH = top - usedH
+    usedH = bottom
+    let end = 0
+    const cells = b.spots.flatMap(p => {
+      const [from, to] = [Math.max(end, at(p.x)), Math.max(end, at(p.x + p.w))]
+      const gap = from - end
+      end = to
+
+      return [
+        ...(gap > 0 ? [<Box key={`gap-${p.key}`} width={`${gap}%`} />] : []),
+        <Box key={`spot-${p.key}`} width={`${to - from}%`} overflow="hidden" flexDirection="row" alignItems="center" justifyContent="center">
+          <Box width={HIT_ROOM} flexShrink={0} flexDirection="row" alignItems="center" justifyContent="center">
+            <Button key={p.key} plain label={hit(p.w / w)} onPress={p.onPress} />
+          </Box>
+        </Box>,
+      ]
+    })
 
     return [
-      ...(gap > 0 ? [<Box key={`gap-${p.key}`} width={`${gap}%`} />] : []),
-      <Box key={`spot-${p.key}`} width={`${Math.max(0, to - from)}%`} overflow="hidden" flexDirection="row" alignItems="center" justifyContent="center">
-        <Box width={HIT_ROOM} flexShrink={0} flexDirection="row" alignItems="center" justifyContent="center">
-          <Button key={p.key} plain label={hit(p.w / w)} onPress={p.onPress} />
-        </Box>
+      ...(gapH > 0 ? [<Box key={`band-gap-${i}`} height={`${gapH}%`} />] : []),
+      <Box key={`band-${i}`} height={`${bottom - top}%`} flexDirection="row">
+        {cells}
       </Box>,
     ]
   })
 
   return (
     <Box position="absolute" left={0} right={0} top={0} bottom={0} flexDirection="column">
-      {top > 0 && <Box height={`${Math.round((top * 100) / height)}%`} />}
-      <Box height={`${Math.round((band * 100) / height)}%`} flexDirection="row">
-        {cells}
-      </Box>
+      {rows}
     </Box>
   )
 }
+
+/** Click targets in one band of a drawing's height. */
+const hitRow = (els: Els, w: number, height: number, top: number, band: number, spots: readonly Spot[]) =>
+  hitBands(els, w, height, [{ top, band, spots }])
 
 /** One drawn strip, with click targets over the whole of its height. */
 const strip = (els: Els, Art: SvgEl, lay: Layout, height: number, source: string, alt: string, spots: readonly Spot[] = []) => (
@@ -226,15 +252,14 @@ const summaryCard = ($: $, els: Els, Art: SvgEl, lay: Layout, pane: string, sum:
         source={summarySvg(lay, sum, filter, sum.unit, picked ? { scopes: SCOPES, picked } : undefined)}
         alt={`${sum.percent}%, ${ofDone(sum.done, sum.total)}: ${sum.inProgress} in progress, ${sum.notStarted} not started. Showing ${FILTER_ALT[filter]}.${picked ? ` Sessions: ${SCOPE_LABEL[picked]}.` : ''}`}
       />
-      {hitRow(
-        els,
-        lay.w,
-        SUMMARY_H,
-        PILL_TOP,
-        PILL_H,
-        at.pills.map(p => ({ key: `filter-${pane}:${p.id}`, x: p.x, w: p.w, onPress: () => void pickFilter($, pane, p.id) })),
-      )}
-      {picked && hitRow(els, lay.w, SUMMARY_H, SCOPE_TOP, SCOPE_H, scopeSpots($, at.scope))}
+      {hitBands(els, lay.w, SUMMARY_H, [
+        {
+          top: PILL_TOP,
+          band: PILL_H,
+          spots: at.pills.map(p => ({ key: `filter-${pane}:${p.id}`, x: p.x, w: p.w, onPress: () => void pickFilter($, pane, p.id) })),
+        },
+        ...(picked ? [{ top: SCOPE_TOP, band: SCOPE_H, spots: scopeSpots($, at.scope) }] : []),
+      ])}
     </Box>
   )
 }
@@ -270,15 +295,15 @@ const tabStrip = ($: $, els: Els, Art: SvgEl, lay: Layout, tabs: readonly TabSpe
   return (
     <els.Box flexDirection="column">
       <Art source={tabsSvg(lay, tabs, active)} alt={`Tabs: ${tabs.map(t => `${t.title}${t.percent === undefined ? '' : ` ${t.percent}%`}${t.id === active ? ' (shown)' : ''}`).join(', ')}`} />
-      {rows.map(y =>
-        hitRow(
-          els,
-          lay.w,
-          height,
-          y,
-          TABS_H,
-          at.filter(t => t.y === y).map(t => ({ key: `tab-${t.id}`, x: t.x, w: t.w, onPress: () => void update($, view, () => t.id) })),
-        ),
+      {hitBands(
+        els,
+        lay.w,
+        height,
+        rows.map(y => ({
+          top: y,
+          band: TABS_H,
+          spots: at.filter(t => t.y === y).map(t => ({ key: `tab-${t.id}`, x: t.x, w: t.w, onPress: () => void update($, view, () => t.id) })),
+        })),
       )}
     </els.Box>
   )
