@@ -251,7 +251,7 @@ List a project's checklist files in `.claude/agent-track.json` in that project's
 | `strip` | Regular expressions; text matching them is removed from every heading. |
 | `keepEmptySections` | Keeps `##` sections that have no boxes. Default `false`. |
 
-At the top level, `"discover": false` turns off the tabs found by shape, so only the listed files show. Listed tabs come first and keep their settings; a found tab opens the board only when you ask for it.
+At the top level, `"hide": ["docs/feature-progress.md"]` keeps those files from being found, and `"discover": false` turns off the tabs found by shape altogether, so only the listed files show. A tab's file is shown under its title. Listed tabs come first and keep their settings; a found tab opens the board only when you ask for it.
 
 After editing the list, run `/agent-track reload`.
 

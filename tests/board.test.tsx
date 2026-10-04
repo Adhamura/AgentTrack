@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { applyLive, columnCounts, columnsOf, foundTitle, isChecklist, isTrackerName, itemNote, itemsOf, parseDoc, splitFacets, tabPaneId } from '../hooks/docs'
+import { applyLive, columnCounts, columnsOf, foundTitle, isChecklist, isTrackerName, itemNote, parseConfig, itemsOf, parseDoc, splitFacets, tabPaneId } from '../hooks/docs'
 import { emptyRowSvg, layout, useScheme } from '../hooks/look'
 import { partial, sameWork } from '../hooks/match'
 import { claudeArgv, compareVersions, findInstalled, installedVersion, lastLine, marketplaceDir, offered, outcomeText, pluginsDirOf, versionOf } from '../hooks/update'
@@ -651,6 +651,7 @@ test('a Markdown checklist is found by its shape, and a leading BLOCKER stays a 
   ].join('\n')
   expect(isChecklist(steam)).toBe(true)
   expect(isChecklist('# Notes\n- [ ] one\n- [ ] two')).toBe(false)
+  expect(parseConfig('{"hide":["docs/feature-progress.md"],"tabs":[]}')).toMatchObject({ discover: true, hide: ['docs/feature-progress.md'] })
   // Only files named as trackers are found: plans and ideas with boxes stay out.
   expect(['steam-readiness.md', 'art-progress.md', 'roadmap.md', 'launch_checklist.md', 'TODO.md'].map(isTrackerName)).toEqual([true, true, true, true, true])
   expect(

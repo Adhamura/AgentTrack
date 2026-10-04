@@ -122,6 +122,12 @@ const filters = atom({ plugin: 'agent-track', key: 'filter' } as const, {} as Re
 const updating = atom({ plugin: 'agent-track', key: 'updating' } as const, false)
 const searches = atom({ plugin: 'agent-track', key: 'search' } as const, {} as Record<string, string>)
 const scope = atom({ plugin: 'agent-track', key: 'scope' } as const, 'project' as Scope)
+/**
+ * The Agents tab's percent as the tab bar and the bar above the prompt show
+ * it, kept apart from the boards: a checklist tab reads this one number, so
+ * it is not drawn again each time any session's board changes.
+ */
+const agentsPct = atom({ plugin: 'agent-track', key: 'agentsPct' } as const, null as number | null)
 /** Where the picked scope is kept past the session, so the next one opens the same way. */
 const SCOPE_STORE = 'scope'
 
@@ -269,7 +275,7 @@ const scopeSpots = ($: $, at: readonly { id: Scope; x: number; w: number }[]): S
 
 /** The board's tabs: each project checklist, then Agents last, each with its percent. */
 const tabList = async ($: $): Promise<TabSpec[]> => {
-  const sum = summarize(await shownBoard($))
+  const pct = await read($, agentsPct)
   const live = await read($, liveWork)
   const all = await read($, docs)
 
@@ -281,8 +287,15 @@ const tabList = async ($: $): Promise<TabSpec[]> => {
 
       return { id, title: tab.title, percent: c?.percent }
     }),
-    { id: PANE, title: TITLE, percent: sum.total > 0 ? sum.percent : undefined },
+    { id: PANE, title: TITLE, percent: pct ?? undefined },
   ]
+}
+
+/** Keeps `agentsPct` in step with the boards; writes only when the number changed. */
+const refreshAgentsPct = async ($: $) => {
+  const sum = summarize(await shownBoard($))
+  const pct = sum.total > 0 ? sum.percent : null
+  if (pct !== (await read($, agentsPct))) await update($, agentsPct, () => pct)
 }
 
 /** The desktop tab bar: drawn, with a click target over each tab; none when there is one tab. */
@@ -699,7 +712,23 @@ const syncRun = async ($: $) => {
 }
 
 /** The project's checklist tabs (from CONFIG_FILE) and the last change seen of each file. */
-const docCtx = { tabs: [] as DocTab[], seen: {} as Record<string, number>, project: '' }
+const docCtx = {
+  tabs: [] as DocTab[],
+  seen: {} as Record<string, number>,
+  /** What each tab's file said when last drawn, to skip a redraw when it did not change. */
+  bodies: {} as Record<string, string>,
+  project: '',
+  /** Doc work runs one job at a time, so a timer and a tool's re-read never overlap. */
+  queue: Promise.resolve() as Promise<unknown>,
+}
+
+/** Runs doc work after the job before it; a failure never blocks the next. */
+const serial = (job: () => Promise<unknown>) => {
+  const run = docCtx.queue.then(job, job)
+  docCtx.queue = run.catch(() => undefined)
+
+  return run
+}
 
 const DOC_SPAN = 7 * 24 * 60 * 60 * 1000
 
@@ -763,8 +792,8 @@ const FOUND_DIRS = ['.', 'docs', 'doc'] as const
  * like checklists (`isChecklist`) that the config does not list already:
  * each becomes a tab of its own.
  */
-const findChecklists = async ($: $, listed: readonly DocTab[]): Promise<DocTab[]> => {
-  const known = new Set(listed.map(t => t.file.replace(/^\.\//, '').toLowerCase()))
+const findChecklists = async ($: $, listed: readonly DocTab[], hide: readonly string[] = []): Promise<DocTab[]> => {
+  const known = new Set([...listed.map(t => t.file), ...hide].map(f => f.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase()))
   const found: DocTab[] = []
   for (const dir of FOUND_DIRS) {
     let entries: Awaited<ReturnType<$['fs']['list']>> = []
@@ -791,14 +820,16 @@ const findChecklists = async ($: $, listed: readonly DocTab[]): Promise<DocTab[]
 
 const loadDocConfig = async ($: $) => {
   let discover = true
+  let hide: string[] = []
   try {
     const config = parseConfig(await $.fs.read(CONFIG_FILE))
     docCtx.tabs = config.tabs
     discover = config.discover
+    hide = config.hide
   } catch {
     docCtx.tabs = []
   }
-  if (discover) docCtx.tabs = [...docCtx.tabs, ...(await findChecklists($, docCtx.tabs))]
+  if (discover) docCtx.tabs = [...docCtx.tabs, ...(await findChecklists($, docCtx.tabs, hide))]
   try {
     docCtx.project = (await $.fs.stat('.', { resolve: true })).realPath ?? ''
   } catch {
@@ -832,6 +863,10 @@ const refreshDocs = async ($: $, force = false) => {
       continue
     }
     const doc = { ...parseDoc(text, tab), updatedAt: mtime }
+    // Touched but not changed (a save with the same text): nothing to draw again.
+    const body = JSON.stringify(doc.sections) + doc.title
+    if (docCtx.bodies[id] === body && !force) continue
+    docCtx.bodies[id] = body
     await update($, docs, all => ({ ...all, [id]: doc }))
     const done = doc.sections.flatMap(itemsOf).filter(i => i.status === 'completed').length
     const key = `history:${docCtx.project}|${tab.file}`
@@ -844,13 +879,21 @@ const refreshDocs = async ($: $, force = false) => {
   }
 }
 
-const reread = async ($: $, said: string) => {
-  // A Markdown file written that no tab shows yet may be a new checklist: look again.
-  const isNewMd = /\.md\b/i.test(said) && !docCtx.tabs.some(t => said.includes(t.file.split('/').pop() ?? t.file))
-  if (said.includes('agent-track.json') || isNewMd) await loadDocConfig($)
-  if (said.includes('agent-track.json') || isNewMd || docCtx.tabs.some(t => said.includes(t.file.split('/').pop() ?? t.file))) {
-    await refreshDocs($, true)
-  }
+/**
+ * Re-reads after a tool ran, from what the call names (its file path, or its
+ * command), never from the text it wrote: a re-read of the tabs it names,
+ * the tab list again when it touched the config or wrote a new tracker file.
+ * Unchanged files cost a stat each (`refreshDocs` goes by modified time).
+ */
+const reread = async ($: $, call: Record<string, unknown>) => {
+  const paths = [call.file_path, call.notebook_path, call.path].filter((v): v is string => typeof v === 'string').map(p => p.replace(/\\/g, '/'))
+  const said = [...paths, typeof call.command === 'string' ? call.command : ''].join('\n')
+  const isConfig = said.includes('agent-track.json')
+  const names = (t: DocTab) => said.includes(t.file.split('/').pop() ?? t.file)
+  const isNewTracker = paths.some(p => /\.md$/i.test(p) && isTrackerName(p) && !docCtx.tabs.some(t => p.endsWith(t.file)))
+  if (!isConfig && !isNewTracker && !docCtx.tabs.some(names)) return
+  if (isConfig || isNewTracker) await loadDocConfig($)
+  await refreshDocs($, isConfig)
 }
 
 /** What runs in this session now: running agents' labels, and the todo items in progress on the board. */
@@ -1791,15 +1834,17 @@ export const register: Register = (on, options) => {
     // An unload (the next reload) ends its waits: nothing is left to draw then.
     void redrawAfterLoad($).catch(() => undefined)
     $.clock.every(3_000, () => {
-      void refreshDocs($)
+      void serial(() => refreshDocs($))
       void refreshLive($)
     })
     $.clock.every(2_000, () => {
       if (ctx.isSyncing) return
       ctx.isSyncing = true
-      void syncRun($).finally(() => {
-        ctx.isSyncing = false
-      })
+      void syncRun($)
+        .then(() => refreshAgentsPct($))
+        .finally(() => {
+          ctx.isSyncing = false
+        })
     })
 
     return next(e)
@@ -1817,7 +1862,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
-    const sum = summarize(await shownBoard($))
+    const pct = await read($, agentsPct)
     const live = await read($, liveWork)
     const tabs = Object.entries(await read($, docs)).flatMap(([id, raw]) => {
       const tab = docCtx.tabs.find(t => tabPaneId(t) === id)
@@ -1826,7 +1871,7 @@ export const register: Register = (on, options) => {
 
       return [`${tab.title} ${c.percent}%`]
     })
-    const parts = [...tabs, ...(sum.total > 0 ? [`${TITLE} ${sum.percent}%`] : [])]
+    const parts = [...tabs, ...(pct !== null ? [`${TITLE} ${pct}%`] : [])]
     const isUpdating = await read($, updating)
 
     return (
@@ -1899,26 +1944,30 @@ export const register: Register = (on, options) => {
   /** A tool that writes files and names a tab's file (or the tab list) re-reads it right after it ran. */
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const ran = await next(e)
-    await reread($, JSON.stringify(e))
+    // In the background: the tool's result goes back to the model at once.
+    void serial(() => reread($, e as unknown as Record<string, unknown>))
 
     return ran
   })
   on('tool.call', { tool: 'Write' }, async ($, e, next) => {
     const ran = await next(e)
-    await reread($, JSON.stringify(e))
+    // In the background: the tool's result goes back to the model at once.
+    void serial(() => reread($, e as unknown as Record<string, unknown>))
 
     return ran
   })
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
-    await reread($, JSON.stringify(e))
+    // In the background: the tool's result goes back to the model at once.
+    void serial(() => reread($, e as unknown as Record<string, unknown>))
 
     return ran
   })
   // PowerShell is a Windows tool this build's type table may not list.
   on('tool.call', { tool: 'PowerShell' } as unknown as { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
-    await reread($, JSON.stringify(e))
+    // In the background: the tool's result goes back to the model at once.
+    void serial(() => reread($, e as unknown as Record<string, unknown>))
 
     return ran
   })

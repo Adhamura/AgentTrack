@@ -113,6 +113,8 @@ declare module 'claude-code' {
       search: Record<string, string>
       /** Which sessions the board shows: this one, this project's, or every one on this machine. */
       scope: 'session' | 'project' | 'all'
+      /** The Agents tab's percent for the tab bar and the bar above the prompt; null with no tasks. */
+      agentsPct: number | null
     }
   }
 }
