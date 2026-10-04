@@ -183,7 +183,7 @@ The desktop app may not list `/agent-track` in its suggestions; type the whole c
 
 ## Project checklists
 
-Your project's own checklists, anything in Markdown with `- [ ]` boxes, each get a tab before **Agents**, in the same design. List them in [`.claude/agent-track.json`](#agent-trackjson).
+Your project's own checklists, anything in Markdown with `- [ ]` boxes, each get a tab before **Agents**, in the same design. List them in [`.claude/agent-track.json`](#agent-trackjson), or just save them: a Markdown file in the project's folder, `docs/` or `doc/` with at least 5 boxes under `##` headings gets a tab by itself, named after its `#` heading (README, CHANGELOG, CLAUDE and similar files are skipped). A new file shows up as soon as an agent writes it, or after `/agent-track reload`.
 
 For example, an excerpt of `docs/art-progress.md`:
 
@@ -216,7 +216,7 @@ The full file (1.1 above, plus more groups and a second act) renders as this tab
 
 - **Structure.** The `#` heading is the title at the top of the tab (the tab's `title` when there is none). Each `##` heading is a section with its own progress bar; each `###` under it is a group with its own progress ring. **Boxes must sit under a `##` heading:** boxes before the first `##` are not shown. Sections start open unless they are finished; groups start closed.
 - **Boxes.** `- [x]` is done, `- [ ]` is not started, and `- [~]`, `- [-]` or `- [/]` is in progress. Nested boxes count too. Both `-` and `*` bullets work, and `[X]` counts as done.
-- **Names.** An item's name is its **bold** part, or its first 70 characters. Press it for the whole line.
+- **Names.** An item's name is its **bold** part, or its first 70 characters. A leading tag in capitals stays a label in front of it: `- [ ] **BLOCKER** Original hero rig…` reads *BLOCKER: Original hero rig…*. Press it for the whole line.
 - **Live matching.** An open item shows *In progress* while something running in this session, or in another session in this project (unless the switch is on **Session**), names the same work: a running agent's label, or a todo item in progress. It matches by task code (`HU.5`, `W.14`) or when one title covers at least 80% of the other (character-pair similarity, no AI). Done items never change, and nothing is written back to the file. A section or group whose title names running work is marked live too.
 - **Refresh.** A tab refreshes by itself when its file changes, whether Claude or you edited it.
 
@@ -251,7 +251,11 @@ List a project's checklist files in `.claude/agent-track.json` in that project's
 | `strip` | Regular expressions; text matching them is removed from every heading. |
 | `keepEmptySections` | Keeps `##` sections that have no boxes. Default `false`. |
 
+At the top level, `"discover": false` turns off the tabs found by shape, so only the listed files show. Listed tabs come first and keep their settings; a found tab opens the board only when you ask for it.
+
 After editing the list, run `/agent-track reload`.
+
+Each tab is read again only when its file changes (checked every 3 seconds, and right after an agent edits it); switching tabs and redrawing reuse what was read and matched.
 
 ### Settings
 

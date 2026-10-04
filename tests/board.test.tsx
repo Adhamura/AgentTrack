@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { applyLive, columnCounts, columnsOf, itemNote, itemsOf, parseDoc, splitFacets, tabPaneId } from '../hooks/docs'
+import { applyLive, columnCounts, columnsOf, foundTitle, isChecklist, itemNote, itemsOf, parseDoc, splitFacets, tabPaneId } from '../hooks/docs'
 import { emptyRowSvg, layout, useScheme } from '../hooks/look'
 import { partial, sameWork } from '../hooks/match'
 import { claudeArgv, compareVersions, findInstalled, installedVersion, lastLine, marketplaceDir, offered, outcomeText, pluginsDirOf, versionOf } from '../hooks/update'
@@ -630,4 +630,79 @@ test('the drawings take a light host theme at its word, and follow the system ot
   // A line's details leave out the name it starts with.
   expect(itemNote({ id: 'i', title: 'HU.5 — The trail', detail: 'HU.5 — The trail. Tracks and scent.', status: 'pending' })).toBe('Tracks and scent.')
   expect(itemNote({ id: 'i', title: 'Plain', detail: 'Plain', status: 'pending' })).toBeUndefined()
+})
+
+test('a Markdown checklist is found by its shape, and a leading BLOCKER stays a label', async () => {
+  const steam = [
+    '# Steam readiness',
+    '',
+    '## How to use this file',
+    '- A line that starts with **BLOCKER** stops the release.',
+    '',
+    '## 1. Rights',
+    '- [ ] **BLOCKER** Original hero rig in place of the stand-in. Use the same clip names.',
+    '- [ ] **BLOCKER** `enemy/Mouse`: confirm whether it is a stand-in too.',
+    '- [x] Fonts are under the SIL Open Font License (checked 2026-10-04).',
+    '## 2. Game loop',
+    '- [ ] (1.0) Act II: 60 rooms, enemies, bosses, story.',
+    '- [ ] Play from a new save through Act I in one run.',
+    '## Milestones',
+    '| # | Milestone |',
+  ].join('\n')
+  expect(isChecklist(steam)).toBe(true)
+  expect(isChecklist('# Notes\n- [ ] one\n- [ ] two')).toBe(false)
+  expect(foundTitle(steam, 'docs/steam-readiness.md')).toBe('Steam readiness')
+  expect(foundTitle('no heading', 'docs/steam-readiness.md')).toBe('steam readiness')
+  const doc = parseDoc(steam, { title: 'Steam readiness', file: 'docs/steam-readiness.md' })
+  expect(doc.sections.map(s => s.title)).toEqual(['1. Rights', '2. Game loop'])
+  expect(doc.sections[0]!.items.map(i => i.title)).toEqual([
+    'BLOCKER: Original hero rig in place of the stand-in. Use the same cli…',
+    'BLOCKER: enemy/Mouse: confirm whether it is a stand-in too',
+    'Fonts are under the SIL Open Font License (checked 2026-10-04)',
+  ])
+  // A bold name that is not a tag is still the name.
+  expect(parseDoc('## S\n- [ ] **HU.5 — The trail.** Tracks.', { title: 'R', file: 'r.md' }).sections[0]!.items[0]!.title).toBe('HU.5 — The trail')
+})
+
+test('a checklist found in docs gets a tab without being listed, before Agents, and its edits show', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  on('agent.list', () => ({ value: [] }))
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  let mtime = 1000
+  on('fs.write', () => ({ value: undefined }) as never)
+  let steam = ['# Steam readiness', '## 1. Rights', ...[1, 2, 3, 4, 5].map(n => `- [ ] **BLOCKER** Thing ${n}`)].join('\n')
+  on('fs.read', ($, e) => {
+    if (e.path.endsWith('agent-track.json')) throw new Error('ENOENT')
+    if (e.path.endsWith('docs/steam-readiness.md') || e.path.endsWith('README.md')) return { value: steam }
+
+    return { value: '# Notes\n- [ ] one' }
+  })
+  on('fs.stat', () => ({ value: { kind: 'file', mtimeMs: mtime, size: 1, realPath: '/p' } as never }))
+  on('fs.list', ($, e) => ({
+    value: (e.path.endsWith('/docs')
+      ? [{ name: 'steam-readiness.md', kind: 'file' }, { name: 'notes.md', kind: 'file' }]
+      : !/\/docs?$/.test(e.path)
+        ? [{ name: 'README.md', kind: 'file' }]
+        : []) as never,
+  }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }) as never)
+  on('tool.register', () => ({ value: { tool: 'mcp__agent-track__todo' } }))
+  on('command.register', () => ({ value: { command: 'agent-track' } }))
+  on('session.start', ($, e) => e as never)
+  on('env.get', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'me' }))
+  await $.session.start({ cwd: '/p', surface: 'terminal', isInteractive: true } as never)
+  const ui = await $.ui.mount({ plugin: 'agent-track', surface: 'terminal', ...PANE, props: paneProps as never })
+  const tabKeys = (await ui.findAll({ type: 'Button' })).map(b => String(b.key)).filter(k => k.startsWith('tab-'))
+  expect(tabKeys).toEqual(['tab-agent-track-steam-readiness', 'tab-agent-track'])
+  const tabLabel = async () => String((await ui.find({ key: 'tab-agent-track-steam-readiness' }))?.props.label)
+  expect(await tabLabel()).toMatch(/0%/)
+  // The file changes on disk: the next look at it shows the new marks.
+  steam = steam.replace('- [ ] **BLOCKER** Thing 1', '- [x] **BLOCKER** Thing 1')
+  mtime = 2000
+  await clock.advance(3_100)
+  expect(await tabLabel()).toMatch(/20%/)
+  await ui.unmount()
 })
