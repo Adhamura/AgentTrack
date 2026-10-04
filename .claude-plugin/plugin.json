@@ -1,6 +1,6 @@
 {
   "name": "agent-track",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "description": "Live progress board for Claude Code: every session, subagent and todo list on one board, in the terminal and the desktop app.",
   "author": {
     "name": "Kazuki"
