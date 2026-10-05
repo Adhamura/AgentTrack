@@ -2,23 +2,23 @@
 
 # Agent Track
 
-**A live progress board for Claude Code.**<br>
-Every session, subagent, todo list and project checklist on one board, updating as the work happens,<br>in the Claude desktop app and in the terminal.
+**See every Claude Code session working on your project, live.**<br>
+Every session, subagent and todo list on one board, and your project's own checklists ticking over to *In progress*<br>while agents in other sessions work on them. In the Claude desktop app and in the terminal.
 
 [![Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FAdhamura%2FAgentTrack%2Fmain%2F.claude-plugin%2Fplugin.json&query=%24.version&label=version&color=1f6ff5&cacheSeconds=3600)](https://github.com/Adhamura/AgentTrack/commits/main)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2fb36a)](LICENSE)
 [![Claude Code ≥ 2.1.285](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.285-d97757)](#requirements)
 
-[Quick start](#quick-start) · [Usage](#usage) · [Project checklists](#project-checklists) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting)
+[Quick start](#quick-start) · [Live across sessions](#live-across-sessions) · [How it works](#how-it-works) · [Project checklists](#project-checklists) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting)
 
 </div>
 
 <br>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/agents-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="docs/agents.png">
-  <img alt="The Agents tab of Agent Track in the Claude desktop app: a 50% summary with filters, a Session / Project / All switch, a search field, and Working, Idle and Done sections with each agent's todo list" src="docs/agents.png" width="880">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/live-agents-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/live-agents.png">
+  <img alt="The Agents tab with the Project scope: three other sessions of the same project (Refactor wave 2, Editor cleanup, Build tooling) and the subagents each one runs, such as Q.4 — Data file helpers, each with what it is doing now and its progress" src="docs/live-agents.png" width="880">
 </picture>
 
 > [!NOTE]
@@ -75,19 +75,46 @@ Settings are read when a session starts, so reopen sessions that were already ru
 
 ## Why
 
-Claude Code often runs several things at once: a main session, a few subagents, maybe a second session in a worktree. Their todo lists live in separate transcripts, and a subagent without a todo list shows nothing at all. Agent Track gathers all of it on one board, so you can see at a glance what is running, what is next and what is done, without scrolling back through any of them.
+A real project in Claude Code is rarely one conversation. You plan in one session, start a refactor in a second, run a build fix in a worktree, and each of them launches subagents. Their todo lists live in separate transcripts, a subagent without a todo list shows nothing at all, and your roadmap file only changes when someone remembers to tick it.
+
+Agent Track puts all of it on one board, in every session you open: what each session and agent is doing right now, what is next and what is done, and which lines of your plan are being worked on at this moment, wherever that work runs.
+
+## Live across sessions
+
+This is what Agent Track is for. Open the board in any session of a project and you see the work of **every** session in that project, as it happens, without switching windows.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/live-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/live.png">
+  <img alt="A project checklist, Plan — merge duplicated code: Q.4, Q.7, Q.8, Q.10 and Q.13 show In progress with a blue live dot, because subagents in three other sessions are working on them right now; the file itself was last edited 3 hours ago" src="docs/live.png" width="880">
+</picture>
+
+Above, the planning session shows the project's `docs/plan.md`. Nobody has edited that file in 3 hours, yet five lines read *In progress* with a blue live dot: three other sessions (one in a worktree) have subagents named `Q.4 — Data file helpers`, `Q.7 — Catalog lists and pickers` and so on, and the board matched each one to its line. The [image at the top](#agent-track) is the **Agents** tab of the same session: every session of the project, with the subagents it runs and the step each one is on.
+
+- **Every session of the project.** Sessions in the same folder, a folder inside it or one of its worktrees (`.claude/worktrees/<name>`) all count. **Session · Project · All** at the top right of the Agents tab narrows it to this session or widens it to your whole machine.
+- **Every agent, todo list or not.** A subagent shows up within seconds of starting, with its type and current step, even one that never writes a todo list or started before Agent Track loaded.
+- **Your plan lights up by itself.** A checklist line shows *In progress* while any running agent or in-progress todo item in the project names it: by task code (`Q.4`, `HU.5`) or by most of its title. When the work stops, the line goes back to how the file has it. Nothing is ever written to your files.
+- **Always current.** Sessions sync every 2 seconds and the board redraws on its own. Closed sessions drop to **Done** and are forgotten after 12 hours.
+- **Nothing to set up.** Install it once; every session that loads it joins in. Sessions without it still appear, busy or idle, with no tasks.
+
+**Tip:** name agents and todo items after your checklist's codes, and ask for it in your `CLAUDE.md` so every session does it:
+
+```markdown
+When you start a subagent or a todo item for a line of docs/plan.md,
+start its description with that line's code, e.g. "Q.4 — Data file helpers".
+```
 
 ## Features
 
 <table>
 <tr>
 <td width="50%" valign="top">
-<b>Every agent, one board</b><br>
-One row per session and subagent: its title, what it is doing right now, a progress ring with done/total, and when it last changed. A subagent gets its row within seconds of starting, todo list or not.
+<b>Every session of the project, live</b><br>
+The work of every session in this folder, its subfolders and its worktrees, on one board in each of them. <a href="#live-across-sessions">More</a>.
 </td>
 <td width="50%" valign="top">
-<b>This session, this project, or all</b><br>
-A switch picks the scope. <b>Project</b> (the default) covers every session in this folder, a folder inside it or one of its worktrees. Sessions sync live, on your machine.
+<b>Every agent, one board</b><br>
+One row per session and subagent: its title, what it is doing right now, a progress ring with done/total, and when it last changed. A subagent gets its row within seconds of starting, todo list or not.
 </td>
 </tr>
 <tr>
@@ -96,14 +123,14 @@ A switch picks the scope. <b>Project</b> (the default) covers every session in t
 Any Markdown file with <code>- [ ]</code> boxes under <code>##</code> headings, such as a roadmap or an asset list, becomes a tab with sections, groups, progress rings and part columns. It refreshes when the file changes.
 </td>
 <td width="50%" valign="top">
-<b>Live matching</b><br>
-An open checklist item shows <i>In progress</i> while a running agent or todo item names the same work.
+<b>Your plan lights up</b><br>
+A checklist line shows <i>In progress</i>, with a live dot, while an agent in any session of the project works on it.
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
-<b>Search and filters</b><br>
-Filter any tab by status, or search it as you type.
+<b>Search, filters and scope</b><br>
+Filter any tab by status, search it as you type, and pick <b>Session</b>, <b>Project</b> or <b>All</b>.
 </td>
 <td width="50%" valign="top">
 <b>Desktop and terminal</b><br>
@@ -134,6 +161,7 @@ The board is one pane with a tab per project checklist and **Agents** always las
 - **Filters.** The summary's pills are filters: press one to show only those tasks, or **All** to see everything again.
 - **Sections.** Working, Idle and Done, each with a colored dot, done/total and its percent. Press anywhere on a header to open or close it. Done starts closed and lists its five latest rows until **Show all**.
 - **Rows and tasks.** Each session or subagent row lists the tasks from its todo list, each with a status chip. Press a task, or a row's **⋯**, for its details right under it: its state, when it started or finished, and how long it took.
+- **Scrolling.** Each tab keeps its own scroll position, separately in every session: switch away and back and it opens where you left it, and a live update never moves it.
 - **Layout.** On the desktop the board is laid out for the pane's real width: narrow panes drop the time column and part words, never the text size. It follows the app's light or dark theme.
 
 ### In the terminal
@@ -156,7 +184,7 @@ The **Session · Project · All** switch at the top right of the Agents summary 
 | **Project** (default) | Every session working in this project's folder, a folder inside it or one of its worktrees (`.claude/worktrees/`), with each session's running agents. |
 | **All** | Every session on your machine. |
 
-Each session running Agent Track publishes its board. Sessions without it still appear, with their busy or idle state. The choice is remembered for the next session.
+Each session running Agent Track publishes its board. Sessions without it still appear, with their busy or idle state. The choice is remembered for the next session. See [How it works](#how-it-works) for how sessions find each other.
 
 ### Check updates
 
@@ -217,7 +245,7 @@ The full file (1.1 above, plus more groups and a second act) renders as this tab
 - **Structure.** The `#` heading is the title at the top of the tab (the tab's `title` when there is none). Each `##` heading is a section with its own progress bar; each `###` under it is a group with its own progress ring. **Boxes must sit under a `##` heading:** boxes before the first `##` are not shown. Sections start open unless they are finished; groups start closed.
 - **Boxes.** `- [x]` is done, `- [ ]` is not started, and `- [~]`, `- [-]` or `- [/]` is in progress. Nested boxes count too. Both `-` and `*` bullets work, and `[X]` counts as done.
 - **Names.** An item's name is its **bold** part, or its first 70 characters. A leading tag in capitals stays a label in front of it: `- [ ] **BLOCKER** Original hero rig…` reads *BLOCKER: Original hero rig…*. Press it for the whole line.
-- **Live matching.** An open item shows *In progress* while something running in this session, or in another session in this project (unless the switch is on **Session**), names the same work: a running agent's label, or a todo item in progress. It matches by task code (`HU.5`, `W.14`) or when one title covers at least 80% of the other (character-pair similarity, no AI). Done items never change, and nothing is written back to the file. A section or group whose title names running work is marked live too.
+- **Live matching.** An open item shows *In progress*, with a live dot, while something running in this session, or in another session in this project (unless the switch is on **Session**), names the same work: a running agent's label, or a todo item in progress. It matches by task code (`HU.5`, `W.14`) or when one title covers at least 80% of the other (character-pair similarity, no AI). Done items never change, and nothing is written back to the file. A section or group whose title names running work is marked live too. [Step 5 of How it works](#how-it-works) has the exact rules.
 - **Refresh.** A tab refreshes by itself when its file changes, whether Claude or you edited it.
 
 ### Part columns
@@ -277,14 +305,46 @@ The key is the plugin's id; for a folder install (`--plugin-dir`) it is `agent-t
 
 ## How it works
 
-Agent Track listens to Claude Code's own events (todo writes, task tools, subagents starting and stopping, turns ending) and keeps a board for the session. Every couple of seconds each session publishes its board and reads the others', which is how the **Project** and **All** scopes see work in other sessions.
+Agent Track runs inside each Claude Code session as a mod. Sessions never talk to each other directly: each one writes its own board to a small file on your machine, and reads everyone else's.
 
-**Privacy.** Your boards never leave your machine, and Agent Track makes no network calls of its own (↻ Check updates asks Claude Code to refresh the marketplace from where you installed it). To sync sessions it:
+```mermaid
+flowchart LR
+  subgraph A["Session: Refactor wave 2 (worktree)"]
+    A1["Subagent Q.4 — Data file helpers"]
+  end
+  subgraph B["Session: Editor cleanup"]
+    B1["Subagent Q.8 — Editor previews"]
+  end
+  A1 --> AF[("~/.claude/agent-track/A.json")]
+  B1 --> BF[("~/.claude/agent-track/B.json")]
+  R[("~/.claude/sessions/<br>Claude Code's list of running sessions")]
+  AF --> Y
+  BF --> Y
+  R --> Y
+  P["docs/plan.md"] --> Y
+  subgraph Y["Your session's board"]
+    T["Agents tab: every session and its agents"]
+    C["Plan tab: Q.4 and Q.8 In progress"]
+  end
+```
 
-- writes each session's board to `~/.claude/agent-track/<session id>.json` (task titles, statuses and times), and
-- reads Claude Code's own list of running sessions in `~/.claude/sessions/` (names, folders, busy/idle).
+1. **Each session keeps its own board.** Agent Track follows the session's events: todo lists (`TodoWrite`, and `mcp__agent-track__todo` for agents without it), `TaskCreate` and `TaskUpdate`, subagents starting and stopping, and turns starting and ending (busy or idle). Every 3 seconds it also reads Claude Code's own list of the session's agents, so a subagent with no todo list still gets a row.
+2. **It publishes that board.** Every 2 seconds, when something changed, it writes the board to `~/.claude/agent-track/<session id>.json`: the session's name and folder, each row's title, type and state, and each task's title, status and times.
+3. **It reads every other session.** On the same beat it reads Claude Code's registry of running sessions in `~/.claude/sessions/` (every session, with or without Agent Track: its name, folder and busy/idle state) and every published board. A board of a session that is no longer running is kept as finished, and dropped after 12 hours.
+4. **It picks the sessions in scope.** **Project** keeps the sessions whose folder is this project's, a folder inside it, or a worktree of it (`<project>/.claude/worktrees/<name>`). **Session** keeps none, **All** keeps every one. Each kept session's rows join the board as *Session › agent*.
+5. **It matches running work to your checklists.** It gathers what is running now: this session's running agents and in-progress todo items, and, unless the scope is **Session**, those of the project's other running sessions. An open checklist line is *In progress*, with a live dot, while one of them names the same work:
+   - **Same task code.** A code is 1 to 4 letters, a dot and a number (`Q.4`, `HU.5`, `W.14`, `DG.5.2`). When both sides have a code, the codes alone decide: `Q.4` never matches `Q.40`.
+   - **Same title.** With no code on one side, the shorter title must cover at least 80% of a stretch of the longer one (character-pair likeness, no AI), and it must be at least two words. A section or group whose title names running work is marked live too.
 
-Boards of closed sessions are ignored after 12 hours. Delete `~/.claude/agent-track/` at any time to clear them. (Paths are under `$CLAUDE_CONFIG_DIR` when you set it.)
+   Done lines never change, and nothing is written back to the file: when the work stops, the line shows what the file says again.
+6. **It draws in the background.** Files are read only when they change (every 3 seconds, and right after an agent edits one), prepared off the drawing path, and drawn once ready, so the board stays responsive while agents work.
+
+**Privacy.** Your boards never leave your machine, and Agent Track makes no network calls of its own (↻ Check updates asks Claude Code to refresh the marketplace from where you installed it). It writes only `~/.claude/agent-track/<session id>.json` and reads `~/.claude/sessions/`. Delete `~/.claude/agent-track/` at any time to clear the boards. (Paths are under `$CLAUDE_CONFIG_DIR` when you set it.)
+
+**Limits.**
+- A session shows its agents and tasks only when Agent Track is loaded in it; reload or restart sessions that were open before you installed or updated it.
+- Matching sees what agents are *named* and the todo items they write, not what they do; name them after the work (see the [tip](#live-across-sessions)).
+- Sessions on other machines are not seen: the sync is through files in your own `~/.claude`.
 
 ## Troubleshooting
 

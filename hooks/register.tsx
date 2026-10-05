@@ -134,6 +134,34 @@ const agentsPct = atom({ plugin: 'agent-track', key: 'agentsPct' } as const, nul
 /** Where the picked scope is kept past the session, so the next one opens the same way. */
 const SCOPE_STORE = 'scope'
 
+/**
+ * Where each tab of the board was scrolled to, in this session: a tab you
+ * come back to opens where you left it. Kept in state, so a reload keeps it;
+ * written as you scroll, read only when switching tabs (never while drawing).
+ */
+const scrolls = atom({ plugin: 'agent-track', key: 'scrolls' } as const, {} as Record<string, number>)
+/** The shown tab and the window's offset as the board last drew them. */
+const drawnAt = { tab: '', offset: 0 }
+/** An offset to put the window at on the next scroll this plugin asks for (see the `ui.scroll` hook). */
+let restoreTo: number | undefined
+
+/** Shows a tab, and scrolls it back to where it was last left once it is drawn. */
+const showTab = async ($: $, tab: string) => {
+  const from = drawnAt.tab
+  if (tab === from) return
+  if (from) {
+    const at = drawnAt.offset
+    await update($, scrolls, all => ({ ...all, [from]: at }))
+  }
+  await update($, view, () => tab)
+  const to = (await read($, scrolls))[tab] ?? 0
+  // Let the new tab draw first, so the window can reach its rows.
+  await $.clock.sleep(120)
+  restoreTo = to
+  const moved = await $.ui.scroll({ to: 'start', in: PANE })
+  if (moved.deny) restoreTo = undefined
+}
+
 /** How long after a toggle its drawing still plays the turn. */
 const MOTION_MS = 700
 /** The shown pane's width in cells, as its last drawing read it: what sizes the drawings and the click targets. */
@@ -279,8 +307,10 @@ const stack = (els: Els, Art: SvgEl, lay: Layout, key: string, items: readonly (
 
       return band
     })
+    // Keyed by what it starts with, not by its place: a stack that grows or shifts keeps its identity, so the surface keeps it (and the scroll) in place.
+    const id = run.find(p => p.spots.length > 0)?.spots[0]?.key ?? `plain-${out.length}`
     out.push(
-      <els.Box key={`${key}-stack-${out.length}`} flexDirection="column">
+      <els.Box key={`${key}-stack-${id}`} flexDirection="column">
         <Art source={stackSvg(lay.w, run)} alt={run.map(p => p.alt).join(' ')} />
         {bands.some(b => b.spots.length > 0) && hitBands(els, lay.w, top, bands)}
       </els.Box>,
@@ -372,7 +402,7 @@ const tabStrip = ($: $, els: Els, Art: SvgEl, lay: Layout, tabs: readonly TabSpe
         rows.map(y => ({
           top: y,
           band: TABS_H,
-          spots: at.filter(t => t.y === y).map(t => ({ key: `tab-${t.id}`, x: t.x, w: t.w, onPress: () => void update($, view, () => t.id) })),
+          spots: at.filter(t => t.y === y).map(t => ({ key: `tab-${t.id}`, x: t.x, w: t.w, onPress: () => void showTab($, t.id).catch(() => undefined) })),
         })),
       )}
     </els.Box>
@@ -395,7 +425,7 @@ const tabRowText = ($: $, els: Els, tabs: readonly TabSpec[], active: string) =>
             plain
             label={t.id === active ? `[${label}]` : label}
             dimColor={t.id !== active}
-            onPress={() => void update($, view, () => t.id)}
+            onPress={() => void showTab($, t.id).catch(() => undefined)}
           />
         )
       })}
@@ -2033,6 +2063,24 @@ export const register: Register = (on, options) => {
     return set
   })
 
+  /** The board's window: kept per tab as the person scrolls it, and put back where it was on a tab's return. */
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (e.origin.kind === 'plugin' && restoreTo !== undefined) {
+      const offset = restoreTo
+      restoreTo = undefined
+
+      return next({ ...e, offset })
+    }
+    const moved = await next(e)
+    if (!moved.deny && e.origin.kind === 'person') {
+      drawnAt.offset = e.offset
+      const tab = drawnAt.tab
+      if (tab) await update($, scrolls, all => ({ ...all, [tab]: e.offset }))
+    }
+
+    return moved
+  })
+
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin.kind === 'person') await update($, dismissed, () => true)
     // The board's search fields are drawn anew when it opens again: give them their queries back.
@@ -2239,6 +2287,9 @@ const drawBoard = async ($: $, e: RenderInput<'Pane'>) => {
   const tabs = await tabList($)
   const shownTab = await read($, view)
   const active = tabs.find(t => t.id === shownTab) ?? tabs[0]!
+  // The window as drawn now belongs to this tab only once it is the one drawn (a switch draws it over the last tab's offset first).
+  if (drawnAt.tab === active.id) drawnAt.offset = e.props.scroll.offset
+  else drawnAt.tab = active.id
   const body =
     active.id === PANE
       ? await drawAgents($, e)
