@@ -151,7 +151,7 @@ const svg = (w: number, h: number, body: string) => {
 }
 
 /**
- * Several drawn strips as ONE drawing, each nested at its height in order:
+ * Several drawn strips as ONE drawing, each moved down to its place in order:
  * one image for the surface to lay out and paint instead of one per row.
  * Their dark-mode rules are gathered once at the top.
  */
@@ -160,11 +160,15 @@ export const stackSvg = (w: number, parts: readonly { svg: string; h: number }[]
   let y = 0
   const body = parts
     .map(p => {
-      const inner = p.svg.replace(/<style>(.*?)<\/style>/g, (_, css: string) => (styles.add(css), ''))
-      const nested = inner.replace(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" /, `<svg y="${y}" `)
+      const inner = p.svg
+        .replace(/<style>(.*?)<\/style>/g, (_, css: string) => (styles.add(css), ''))
+        .replace(/^<svg[^>]*>/, '')
+        .replace(/<\/svg>$/, '')
+      // A group, not a nested <svg>: a host's CSS for svg elements (width: 100%, height: auto) can't reach it.
+      const moved = y === 0 ? `<g>${inner}</g>` : `<g transform="translate(0 ${y})">${inner}</g>`
       y += p.h
 
-      return nested
+      return moved
     })
     .join('')
 
@@ -842,7 +846,7 @@ export const taskRowSvg = (
   const chipX = lay.ring.x + lay.ring.w - chipW
   const cells = o.plan && o.plan.mode !== 'none' ? o.plan.cells : []
   const end = (cells[0] ? cells[0].x : chipW ? chipX : lay.ring.x + lay.ring.w) - 10
-  const titleRoom = end - lay.taskX - (o.isLive ? 14 : 0)
+  const titleRoom = end - lay.taskX - (o.isLive ? 20 : 0)
   const title = fit(o.title, titleRoom, 13)
   const isDone = o.status === 'completed'
 
@@ -855,7 +859,7 @@ export const taskRowSvg = (
         (o.isPicked ? `<rect x="28" y="2" width="${w - 36}" height="${h - 4}" rx="6" ${paint('activeBg')}/>` : '') +
           checkbox(lay.boxX, cy, o.status) +
           `<text x="${lay.taskX}" y="${cy + 4.5}" font-size="13" ${paint(isDone ? 'sub' : 'text')}>${marked(title, titleRoom + 20, 13, o.mark)}</text>` +
-          (o.isLive ? liveDot(lay.taskX + textW(title, 13) + 9, cy) : '') +
+          (o.isLive ? liveDot(lay.taskX + textW(title, 13) * 1.07 + 10, cy) : '') +
           cells.map(c => facetMark(c.x + 7, cy, o.facets?.find(f => f.key === c.key))).join('') +
           (chipW
             ? `<rect x="${chipX}" y="${cy - 10}" width="${chipW}" height="20" rx="10" ${paint(tone.bg)}/>` +

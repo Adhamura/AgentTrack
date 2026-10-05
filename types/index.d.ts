@@ -117,6 +117,8 @@ declare module 'claude-code' {
       agentsPct: number | null
       /** Bumped when a tab was prepared again in the background, so the board draws it. */
       preparedRev: number
+      /** Where each tab of the board was last scrolled to (its window's first row), by tab id. */
+      scrolls: Record<string, number>
     }
   }
 }
