@@ -15,11 +15,7 @@ Every session, subagent and todo list on one board, and your project's own check
 
 <br>
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/live-agents-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="docs/live-agents.png">
-  <img alt="The Agents tab with the Project scope: three other sessions of the same project (Refactor wave 2, Editor cleanup, Build tooling) and the subagents each one runs, such as Q.4 — Data file helpers, each with what it is doing now and its progress" src="docs/live-agents.png" width="880">
-</picture>
+<img alt="A tour of Agent Track: every session and subagent of the project live on one board, what each agent is doing with its todo progress, a checklist ticking over to In progress while agents work, checklist sections with progress, and the same board in the terminal" src="docs/tour.gif" width="880">
 
 > [!NOTE]
 > Agent Track is a **mod**: a Claude Code plugin made of function hooks. Mods are an early-access Claude Code feature and may change between releases.
